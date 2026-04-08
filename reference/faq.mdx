@@ -1,0 +1,233 @@
+---
+title: "FAQ"
+description: "Answers to frequently asked questions about installing, configuring, and running AlphaFold."
+---
+
+<AccordionGroup>
+
+  <Accordion title="What operating systems are supported?">
+    AlphaFold supports **Linux only**. The codebase has not been tested on macOS or Windows, and the Docker image is built on Ubuntu. If you are using a non-Linux machine you must run AlphaFold inside a Linux virtual machine or on a remote Linux host.
+  </Accordion>
+
+  <Accordion title="What are the hardware requirements?">
+    **GPU**: A modern NVIDIA GPU is required. GPU memory determines the maximum protein length you can predict. Larger GPUs (e.g. A100 80 GB) can accommodate sequences of several thousand residues. The reference benchmarks in the README were measured on a single A100.
+
+    **RAM**: The `full_dbs` preset requires approximately 64 GB of system RAM. The `reduced_dbs` preset requires only 8 GB.
+
+    **CPU**: At least 8 CPU cores are recommended. JackHMMER, HHblits, and the template search tools run in parallel on CPU and are the main bottleneck during the data pipeline stage.
+
+    **Disk**: See the disk space question below.
+
+    **Storage I/O**: SSD storage is strongly recommended for the genetic databases. Slow I/O significantly increases MSA search time.
+  </Accordion>
+
+  <Accordion title="Can I run AlphaFold without a GPU?">
+    No. The JAX model inference step requires a CUDA-capable NVIDIA GPU. There is no CPU-only execution path in the official release.
+
+    If you need to run without a GPU, community forks such as ColabFold provide alternatives that use remote MSA servers and may support CPU-only environments, but these are not maintained by DeepMind.
+  </Accordion>
+
+  <Accordion title="How much disk space do I need?">
+    The full database download is approximately **556 GB** compressed. After extraction the total on-disk size is approximately **2.62 TB**:
+
+    | Directory | Approximate size |
+    |---|---|
+    | `bfd/` | ~1.8 TB |
+    | `mgnify/` | ~120 GB |
+    | `uniref30/` | ~206 GB |
+    | `uniref90/` | ~67 GB |
+    | `uniprot/` | ~105 GB |
+    | `pdb_mmcif/` | ~238 GB |
+    | `pdb70/` | ~56 GB |
+    | `pdb_seqres/` | ~0.2 GB |
+    | `params/` | ~5.3 GB |
+
+    If you use `--db_preset=reduced_dbs`, only the small BFD database is needed instead of the full BFD. The reduced set requires approximately **600 GB** on disk. The `bfd/` directory is replaced by `small_bfd/` (~17 GB).
+
+    <Note>
+      Do not place the database download directory inside the AlphaFold repository directory. Docker copies the build context when building the image, and the large databases will make the build extremely slow.
+    </Note>
+  </Accordion>
+
+  <Accordion title="What is the difference between monomer and multimer models?">
+    The **monomer** model (`--model_preset=monomer`, `monomer_casp14`, or `monomer_ptm`) predicts the structure of a single protein chain. It uses HHsearch against PDB70 for template search.
+
+    The **multimer** model (`--model_preset=multimer`) predicts protein complexes containing two or more chains. Key differences:
+
+    - Input FASTA must contain multiple sequences (one per chain).
+    - Template search uses hmmsearch against PDB seqres instead of HHsearch against PDB70.
+    - An additional UniProt MSA is computed for each chain and used to pair sequences across chains by taxonomy.
+    - The model computes both pTM and ipTM (interface pTM) scores. Ranking uses `0.8 × ipTM + 0.2 × pTM`.
+    - By default, 5 seeds are run per model (25 total predictions) instead of 1.
+
+    Use the monomer model for single-chain predictions and the multimer model for any complex with two or more chains, including homomers (identical chains).
+  </Accordion>
+
+  <Accordion title="What is the difference between full_dbs and reduced_dbs presets?">
+    `--db_preset` controls which genetic databases are used to build the Multiple Sequence Alignment (MSA).
+
+    **`full_dbs`** (default): Uses BFD (1.8 TB) searched with HHblits alongside UniRef30, Uniref90, and MGnify. This is the configuration used at CASP14 and generally produces higher-quality MSAs.
+
+    **`reduced_dbs`**: Replaces the full BFD with the much smaller "small BFD" (17 GB), searched with JackHMMER. This significantly reduces disk requirements and MSA search time at the cost of a smaller, potentially lower-diversity MSA.
+
+    `reduced_dbs` requires only 8 CPU cores and 8 GB of RAM, making it suitable for workstations. `full_dbs` requires ~64 GB of RAM for BFD searches.
+
+    For most research applications, `full_dbs` is recommended. Use `reduced_dbs` when disk space or RAM is constrained.
+  </Accordion>
+
+  <Accordion title="What do the pLDDT confidence scores mean?">
+    pLDDT (predicted Local Distance Difference Test) is a per-residue confidence score on a scale of **0 to 100**. It estimates how well the predicted atomic positions for each residue would match the true structure.
+
+    AlphaFold assigns confidence categories as follows:
+
+    | pLDDT range | Category | Interpretation |
+    |---|---|---|
+    | 90 – 100 | Very high | Confident, likely accurate backbone and side chain positions |
+    | 70 – 90 | Confident | Generally accurate backbone, side chains less reliable |
+    | 50 – 70 | Low | Correct topology likely, but local details unreliable |
+    | < 50 | Very low | Disordered region or prediction is unreliable; interpret with caution |
+
+    pLDDT values are stored in the **B-factor column** of the output PDB files. Note that unlike crystallographic B-factors (where lower is better), higher pLDDT indicates greater confidence. Take care when using AlphaFold PDBs in tools that interpret B-factors as temperature factors.
+
+    For the monomer preset, mean pLDDT across all residues is used to rank the 5 models. For multimer, ranking uses `0.8 × ipTM + 0.2 × pTM`.
+  </Accordion>
+
+  <Accordion title="Why are there 5 models and ranked outputs?">
+    AlphaFold trains an ensemble of 5 models with different architectures (varying MSA depth, template usage, and extra MSA size — see `CONFIG_DIFFS` in `alphafold/model/config.py`). Running all 5 provides diversity in the predictions and makes the output more robust.
+
+    After prediction, models are ranked by confidence and written to `ranked_0.pdb` (highest confidence) through `ranked_4.pdb` (lowest confidence). The `ranking_debug.json` file records the confidence scores and maps ranked indices back to the original model names (e.g. `model_3`).
+
+    For the multimer preset, each of the 5 models is run with 5 different random seeds by default (`--num_multimer_predictions_per_model=5`), yielding 25 total predictions. You can reduce this to 1 per model for speed.
+  </Accordion>
+
+  <Accordion title="What is the difference between relaxed and unrelaxed structures?">
+    **Unrelaxed structures** (`unrelaxed_model_*.pdb`) are the direct outputs of the neural network. They can contain small stereochemical violations — bond length and angle errors — because the model is not constrained to produce physically plausible geometries.
+
+    **Relaxed structures** (`relaxed_model_*.pdb`) have been post-processed with Amber force-field energy minimisation via OpenMM. This removes most stereochemical violations and improves local geometry while preserving the global fold.
+
+    By default only the top-ranked model is relaxed (`--models_to_relax=best`). The relaxed structure is generally preferred for downstream applications. If you need all structures relaxed, set `--models_to_relax=all`. If you have issues with the relaxation step (e.g. crashes or very long runtimes), you can disable it with `--models_to_relax=none`.
+  </Accordion>
+
+  <Accordion title="Can I reuse MSAs for multiple runs?">
+    Yes. Use the `--use_precomputed_msas=true` flag. AlphaFold will read the Stockholm (`.sto`) and A3M (`.a3m`) alignment files from the output directory's `msas/` subdirectory instead of running JackHMMER, HHblits, and template search again.
+
+    The output directory must be the same as the original run, since AlphaFold looks for MSA files at fixed paths relative to `--output_dir`.
+
+    This is useful for:
+    - Re-running prediction with different model parameters or random seeds.
+    - Testing different `--max_template_date` values (template search still reruns).
+    - Benchmarking the inference step in isolation from the data pipeline.
+
+    <Warning>
+      AlphaFold does not validate that the protein sequence, database versions, or pipeline configuration are the same as when the MSAs were first computed. Using precomputed MSAs from a different sequence will produce incorrect results silently.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="How do I run on multiple proteins at once?">
+    Pass a comma-separated list of FASTA paths to `--fasta_paths`:
+
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=protein1.fasta,protein2.fasta,protein3.fasta \
+      --max_template_date=2022-01-01 \
+      --model_preset=monomer \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/results
+    ```
+
+    AlphaFold processes them **sequentially**, one at a time. The output directory will contain a separate subdirectory for each input (named by FASTA basename). All basenames must be unique.
+
+    If you need to run many proteins in parallel, you should run multiple independent `run_alphafold.py` processes with separate output directories, or build a batch system on top of `RunModel.predict`.
+  </Accordion>
+
+  <Accordion title="What is the CASP14 reproducibility note about?">
+    AlphaFold's output for a small number of proteins has high inter-run variance, and changing the genetic databases changes the MSA and therefore the prediction. The CASP14 target T1064 is a notable example — the large number of SARS-CoV-2 sequences deposited after CASP14 significantly changes its MSA.
+
+    To reproduce the exact CASP14 results, you must use the same database versions used during CASP14:
+
+    | Database | Version used at CASP14 |
+    |---|---|
+    | UniRef90 | v2020_01 |
+    | MGnify | v2018_12 |
+    | Uniclust30 | v2018_08 |
+    | BFD | Only version available |
+    | PDB templates | Downloaded 2020-05-14 |
+    | PDB70 | 2020-05-13 |
+
+    As an alternative, you can use the current databases but pass `--max_template_date=2020-05-14` to restrict templates to those available at the start of CASP14. This gives you the same template pool while using a more current sequence database.
+  </Accordion>
+
+  <Accordion title="How do I use Singularity instead of Docker?">
+    The AlphaFold team does not officially maintain a Singularity workflow, but community-maintained Singularity setups are available. See the GitHub issues for links:
+
+    - [github.com/deepmind/alphafold/issues/10](https://github.com/deepmind/alphafold/issues/10)
+    - [github.com/deepmind/alphafold/issues/24](https://github.com/deepmind/alphafold/issues/24)
+
+    The general approach is to convert the Docker image to a Singularity Image File (SIF) using `singularity pull docker://alphafold` and then run `singularity exec --nv` with appropriate bind mounts for the database directories and FASTA inputs.
+
+    Singularity is commonly used on HPC systems where Docker is not available. The `--nv` flag enables NVIDIA GPU support inside the container.
+  </Accordion>
+
+  <Accordion title="What are the model parameter licenses?">
+    The **AlphaFold source code** is licensed under the Apache License 2.0.
+
+    The **AlphaFold model parameters** (the `.npz` weight files downloaded by `scripts/download_all_data.sh`) are made available under the **Creative Commons Attribution 4.0 International (CC BY 4.0)** license. This means you can use, share, and adapt the parameters for any purpose, including commercial use, provided you give appropriate credit.
+
+    The CASP15 prediction data is also available under CC BY 4.0.
+
+    Several of the bundled genetic databases have their own licenses:
+
+    | Database | License |
+    |---|---|
+    | BFD (unmodified) | CC BY-SA 4.0 |
+    | BFD (modified by DeepMind) | CC BY-SA 4.0 |
+    | UniRef30 v2021_03 | CC BY-SA 4.0 |
+    | MGnify v2022_05 | CC0 1.0 (public domain) |
+  </Accordion>
+
+  <Accordion title="How do I cite AlphaFold in my publication?">
+    If you use AlphaFold in your research, please cite the primary AlphaFold paper:
+
+    ```bibtex
+    @Article{AlphaFold2021,
+      author  = {Jumper, John and Evans, Richard and Pritzel, Alexander and Green, Tim and
+                 Figurnov, Michael and Ronneberger, Olaf and Tunyasuvunakool, Kathryn and
+                 Bates, Russ and {\v{Z}}{\'\i}dek, Augustin and Potapenko, Anna and
+                 Bridgland, Alex and Meyer, Clemens and Kohl, Simon A A and Ballard, Andrew J
+                 and Cowie, Andrew and Romera-Paredes, Bernardino and Nikolov, Stanislav and
+                 Jain, Rishub and Adler, Jonas and Back, Trevor and Petersen, Stig and
+                 Reiman, David and Clancy, Ellen and Zielinski, Michal and Steinegger, Martin
+                 and Pacholska, Michalina and Berghammer, Tamas and Bodenstein, Sebastian and
+                 Silver, David and Vinyals, Oriol and Senior, Andrew W and Kavukcuoglu, Koray
+                 and Kohli, Pushmeet and Hassabis, Demis},
+      journal = {Nature},
+      title   = {Highly accurate protein structure prediction with {AlphaFold}},
+      year    = {2021},
+      volume  = {596},
+      number  = {7873},
+      pages   = {583--589},
+      doi     = {10.1038/s41586-021-03819-2}
+    }
+    ```
+
+    If you used the AlphaFold-Multimer mode (`--model_preset=multimer`), also cite:
+
+    ```bibtex
+    @article{AlphaFold-Multimer2021,
+      author       = {Evans, Richard and O{\textquoteright}Neill, Michael and Pritzel, Alexander
+                      and Antropova, Natasha and Senior, Andrew and Green, Tim and
+                      {\v{Z}}{\'\i}dek, Augustin and Bates, Russ and Blackwell, Sam and Yim, Jason
+                      and Ronneberger, Olaf and Bodenstein, Sebastian and Zielinski, Michal and
+                      Bridgland, Alex and Potapenko, Anna and Cowie, Andrew and Tunyasuvunakool,
+                      Kathryn and Jain, Rishub and Clancy, Ellen and Kohli, Pushmeet and
+                      Jumper, John and Hassabis, Demis},
+      journal      = {bioRxiv},
+      title        = {Protein complex prediction with AlphaFold-Multimer},
+      year         = {2021},
+      elocation-id = {2021.10.04.463034},
+      doi          = {10.1101/2021.10.04.463034},
+    }
+    ```
+  </Accordion>
+
+</AccordionGroup>

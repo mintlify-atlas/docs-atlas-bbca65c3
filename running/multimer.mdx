@@ -1,0 +1,157 @@
+---
+title: "Folding a Multimer"
+description: "Predict the 3D structure of a protein complex with multiple chains using AlphaFold-Multimer."
+---
+
+AlphaFold-Multimer extends the monomer pipeline to predict the structures of protein complexes — assemblies of two or more chains. It uses per-chain MSAs built from both standard monomer databases and UniProt, and ranks predictions using a combined ipTM+pTM confidence score rather than pLDDT alone.
+
+<Note>
+  AlphaFold-Multimer is a work in progress and is not expected to be as stable as the monomer system. The UniProt database must be downloaded before running multimer predictions.
+</Note>
+
+## FASTA format for complexes
+
+A multimer FASTA file contains one entry per chain in the complex. Each chain is given a separate `>` header and sequence. The number of entries determines the stoichiometry of the complex.
+
+<Tabs>
+  <Tab title="Homomer">
+    A homomer consists of multiple identical chains. Include each copy as a separate entry with a unique header, even though the sequences are the same.
+
+    The following example represents a homotrimer (3 copies of the same sequence):
+
+    ```fasta
+    >sequence_1
+    MNIFEMLRIDEGLRLKIYKDTEGYYTIGIGHLLTKSPSLNAAKSELDKAIGRNTNGVITKDEAEKLFNQDVDAAVRGILRNAKLKPVYDSLDAVRRAALINMVFQMGETGVAGFTNSLRMLQQKRWDEAAVNLAKSRWYNQTPNRAKRVITTFRTGTWDAYKNL
+    >sequence_2
+    MNIFEMLRIDEGLRLKIYKDTEGYYTIGIGHLLTKSPSLNAAKSELDKAIGRNTNGVITKDEAEKLFNQDVDAAVRGILRNAKLKPVYDSLDAVRRAALINMVFQMGETGVAGFTNSLRMLQQKRWDEAAVNLAKSRWYNQTPNRAKRVITTFRTGTWDAYKNL
+    >sequence_3
+    MNIFEMLRIDEGLRLKIYKDTEGYYTIGIGHLLTKSPSLNAAKSELDKAIGRNTNGVITKDEAEKLFNQDVDAAVRGILRNAKLKPVYDSLDAVRRAALINMVFQMGETGVAGFTNSLRMLQQKRWDEAAVNLAKSRWYNQTPNRAKRVITTFRTGTWDAYKNL
+    ```
+
+    Then run:
+
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=homomer.fasta \
+      --max_template_date=2021-11-01 \
+      --model_preset=multimer \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/absolute_path_to_the_output_dir
+    ```
+  </Tab>
+  <Tab title="Heteromer">
+    A heteromer consists of multiple different chains. List each chain as a separate sequence entry. The stoichiometry is set by the number of times each sequence appears.
+
+    The following example represents an A2B3 heteromer (2 copies of sequence A and 3 copies of sequence B):
+
+    ```fasta
+    >sequence_1
+    MKQHKAMIVALIVICITAVVAALVTRKDLCEVHIRTGQTEVAVF
+    >sequence_2
+    MKQHKAMIVALIVICITAVVAALVTRKDLCEVHIRTGQTEVAVF
+    >sequence_3
+    MSDKIIHLTDDSFDTDVLKADGAILVDFWAEWCGPCKMIAPILDEIADEYQGKLTVAKLNIDQNPGTAPKYGIRGIPTLLLFKNGEVAATKVGALSKGQLKEFLDANLAGSGSGSGSGGSMDKIIHLTDDSFDTD
+    >sequence_4
+    MSDKIIHLTDDSFDTDVLKADGAILVDFWAEWCGPCKMIAPILDEIADEYQGKLTVAKLNIDQNPGTAPKYGIRGIPTLLLFKNGEVAATKVGALSKGQLKEFLDANLAGSGSGSGSGGSMDKIIHLTDDSFDTD
+    >sequence_5
+    MSDKIIHLTDDSFDTDVLKADGAILVDFWAEWCGPCKMIAPILDEIADEYQGKLTVAKLNIDQNPGTAPKYGIRGIPTLLLFKNGEVAATKVGALSKGQLKEFLDANLAGSGSGSGSGGSMDKIIHLTDDSFDTD
+    ```
+
+    Then run:
+
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=heteromer.fasta \
+      --max_template_date=2021-11-01 \
+      --model_preset=multimer \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/absolute_path_to_the_output_dir
+    ```
+  </Tab>
+</Tabs>
+
+## Running AlphaFold-Multimer
+
+<Steps>
+  <Step title="Ensure UniProt is downloaded">
+    AlphaFold-Multimer requires the UniProt database in addition to the standard monomer databases. If you ran `scripts/download_all_data.sh` without any arguments, UniProt is already included. Verify that the following file exists:
+
+    ```
+    $DOWNLOAD_DIR/uniprot/uniprot.fasta
+    ```
+
+    If it is missing, download it separately:
+
+    ```bash
+    scripts/download_uniprot.sh $DOWNLOAD_DIR
+    ```
+  </Step>
+
+  <Step title="Prepare a multi-sequence FASTA file">
+    Each chain in the complex must appear as a separate entry in the FASTA file. Use unique headers for each entry even when sequences are identical (as in homomers). See the examples above for correct formatting.
+  </Step>
+
+  <Step title="Run with --model_preset=multimer">
+    The only required change from the monomer command is `--model_preset=multimer`. The `run_docker.py` script automatically selects the correct databases (UniProt and PDB seqres instead of PDB70) when this preset is used.
+
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=multimer.fasta \
+      --max_template_date=2020-05-14 \
+      --model_preset=multimer \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/absolute_path_to_the_output_dir
+    ```
+  </Step>
+</Steps>
+
+## Controlling the number of predictions
+
+By default, AlphaFold-Multimer runs **5 seeds per model** (25 total predictions across 5 models). This increases the chance of finding a good prediction but is computationally expensive.
+
+Use `--num_multimer_predictions_per_model` to reduce the number of seeds per model. Setting it to `1` produces a single prediction per model (5 total), which is significantly faster at a small cost to accuracy:
+
+```bash
+python3 docker/run_docker.py \
+  --fasta_paths=multimer.fasta \
+  --max_template_date=2020-05-14 \
+  --model_preset=multimer \
+  --num_multimer_predictions_per_model=1 \
+  --data_dir=$DOWNLOAD_DIR \
+  --output_dir=/home/user/absolute_path_to_the_output_dir
+```
+
+<Tip>
+  For exploratory predictions or resource-constrained environments, start with `--num_multimer_predictions_per_model=1`. Use the default of 5 for final, high-confidence results.
+</Tip>
+
+## Folding multiple multimers sequentially
+
+Pass a comma-separated list of FASTA paths to fold multiple complexes in sequence:
+
+```bash
+python3 docker/run_docker.py \
+  --fasta_paths=multimer1.fasta,multimer2.fasta \
+  --max_template_date=2021-11-01 \
+  --model_preset=multimer \
+  --data_dir=$DOWNLOAD_DIR \
+  --output_dir=/home/user/absolute_path_to_the_output_dir
+```
+
+Each FASTA file's basename is used as the name of its output subdirectory. All basenames must be unique.
+
+## Databases used by the multimer pipeline
+
+AlphaFold-Multimer uses a different set of databases than the monomer pipeline for template search:
+
+| Database | Monomer | Multimer |
+|---|---|---|
+| UniRef90 | Yes | Yes |
+| MGnify | Yes | Yes |
+| BFD / small BFD | Yes | Yes |
+| UniRef30 | Yes (full_dbs) | Yes (full_dbs) |
+| PDB70 | Yes | No |
+| UniProt | No | Yes |
+| PDB seqres | No | Yes |
+
+The `run_docker.py` script selects the correct database paths automatically based on `--model_preset`.

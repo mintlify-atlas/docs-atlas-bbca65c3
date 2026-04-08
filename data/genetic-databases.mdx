@@ -1,0 +1,179 @@
+---
+title: "Genetic Databases"
+description: "Sequence databases used by AlphaFold for multiple sequence alignment construction and template search."
+---
+
+AlphaFold relies on large genetic (sequence) databases to construct multiple sequence alignments (MSAs) and search for structural templates. The MSA step is critical to AlphaFold's accuracy: co-evolutionary signals captured across thousands of related sequences allow the model to infer which residue pairs are spatially close in the folded structure.
+
+## Prerequisites
+
+Before downloading, install the required tools:
+
+```bash
+sudo apt install aria2 rsync
+```
+
+- `aria2c` — multi-connection downloader used for most databases
+- `rsync` — used to mirror PDB mmCIF files from RCSB
+
+## Database Summary
+
+| Database | Unzipped size | Download size | Used for |
+|---|---|---|---|
+| BFD | ~1.8 TB | ~271.6 GB | Full databases (monomer + multimer) |
+| Small BFD | ~17 GB | ~9.6 GB | Reduced databases preset only |
+| MGnify | ~120 GB | ~67 GB | Monomer + multimer |
+| PDB70 | ~56 GB | ~19.5 GB | Monomer + multimer |
+| PDB mmCIF | ~238 GB | ~43 GB | Monomer + multimer |
+| UniRef30 | ~206 GB | ~52.5 GB | Monomer + multimer |
+| UniRef90 | ~67 GB | ~34 GB | Monomer + multimer |
+| PDB seqres | ~0.2 GB | ~0.2 GB | AlphaFold-Multimer only |
+| UniProt | ~105 GB | ~53 GB | AlphaFold-Multimer only |
+
+**Total (full databases): ~2.62 TB unzipped, ~556 GB download.**
+
+## Database Descriptions
+
+### BFD — Big Fantastic Database
+
+The BFD is a large-scale clustering of sequences from UniProt, Metaclust, SRC, and MERC. It contains roughly 2.5 billion protein sequences clustered at 30% sequence identity. AlphaFold uses it via HHblits to build deep MSAs, which is especially valuable for distant homolog detection.
+
+The full BFD is used with the `full_dbs` preset. For lighter workloads, a reduced first-non-consensus-sequence subset (`small_bfd/`) is used with the `reduced_dbs` preset.
+
+### MGnify
+
+MGnify is the EMBL-EBI metagenomics database containing peptide sequences derived from environmental samples. The version mirrored for AlphaFold is `mgy_clusters_2022_05` (v2022_05), released under CC0 1.0. It expands the sequence search space beyond well-characterized organisms, improving MSA depth for many targets.
+
+### PDB70
+
+A clustered version of the Protein Data Bank (PDB) sequences at 70% sequence identity, formatted for HHsuite template search. AlphaFold uses this database to find known structural templates for the query sequence. The template search is gated by `--max_template_date` to prevent using structures deposited after a cutoff date.
+
+### PDB (mmCIF format)
+
+Full 3D structure records from the RCSB Protein Data Bank in the mmCIF format, mirrored via rsync from `rsync.rcsb.org`. After download, the ~199,000 `.cif` files are flattened into a single `mmcif_files/` directory. An `obsolete.dat` file tracking superseded entries is also downloaded.
+
+This database is used by both the monomer and multimer pipelines for template featurization.
+
+### PDB seqres
+
+A FASTA file of protein sequences extracted directly from PDB records, filtered to protein-only chains. Used exclusively by **AlphaFold-Multimer** to identify which PDB chains contain the sequences of interest.
+
+<Warning>
+  PDB seqres and PDB mmCIF must be downloaded from the same date. If they are out of sync, AlphaFold-Multimer may fail during template search because it cannot match seqres entries to mmCIF structure files. Always update them together.
+</Warning>
+
+### UniRef30 (formerly UniClust30)
+
+UniRef30 is a clustering of UniRef90 at 30% sequence identity, used by AlphaFold via HHblits for MSA construction. The version used is `UniRef30_2021_03`, mirrored from the Göttingen server. It offers a balanced trade-off between coverage and redundancy.
+
+### UniProt
+
+The full UniProt knowledgebase, comprising both SwissProt (manually reviewed) and TrEMBL (computationally annotated). The download script fetches both, decompresses them, and concatenates them into a single `uniprot.fasta` file. Used exclusively by **AlphaFold-Multimer** for pairing sequences across species.
+
+### UniRef90
+
+A clustering of UniProt sequences at 90% sequence identity. AlphaFold uses it via Jackhmmer to build high-quality MSAs focused on close homologs. UniRef90 is fetched from the EBI FTP server.
+
+## Downloading the Databases
+
+The recommended approach is to use the provided `download_all_data.sh` script, which downloads all databases and model parameters in the correct configuration.
+
+<Warning>
+  The download directory must **not** be a subdirectory of the AlphaFold repository. If it is, Docker will copy the large database files into the build context during `docker build`, making image creation extremely slow.
+</Warning>
+
+### Full databases (recommended)
+
+Downloads all databases including the full BFD (~2.62 TB unzipped, ~556 GB download):
+
+```bash
+scripts/download_all_data.sh <DOWNLOAD_DIR> > download.log 2> download_all.log &
+```
+
+The script runs in the background. Monitor progress with:
+
+```bash
+tail -f download.log
+```
+
+### Reduced databases
+
+Downloads the smaller `small_bfd` instead of the full BFD. This is faster and requires significantly less disk space, at the cost of MSA quality:
+
+```bash
+scripts/download_all_data.sh <DOWNLOAD_DIR> reduced_dbs
+```
+
+Use this with `--db_preset=reduced_dbs` when running AlphaFold. The `reduced_dbs` preset requires 8 CPU cores, 8 GB of RAM, and ~600 GB of disk space.
+
+## Permissions and Storage Recommendations
+
+<Warning>
+  If the download directory or its contents do not have full read and write permissions, MSA tools can fail with opaque error messages. Set permissions explicitly after download:
+
+  ```bash
+  sudo chmod 755 --recursive "$DOWNLOAD_DIR"
+  ```
+</Warning>
+
+<Note>
+  SSD storage is strongly recommended. The genetic search step involves random-access reads across very large files; spinning disk drives will cause substantially longer runtimes.
+</Note>
+
+## Expected Directory Structure
+
+After a successful full-database download, the directory layout is:
+
+```
+$DOWNLOAD_DIR/                             # Total: ~ 2.62 TB (download: 556 GB)
+    bfd/                                   # ~ 1.8 TB (download: 271.6 GB)
+        # 6 files.
+    mgnify/                                # ~ 120 GB (download: 67 GB)
+        mgy_clusters_2022_05.fa
+    params/                                # ~ 5.3 GB (download: 5.3 GB)
+        # 5 CASP14 models,
+        # 5 pTM models,
+        # 5 AlphaFold-Multimer models,
+        # LICENSE,
+        # = 16 files.
+    pdb70/                                 # ~ 56 GB (download: 19.5 GB)
+        # 9 files.
+    pdb_mmcif/                             # ~ 238 GB (download: 43 GB)
+        mmcif_files/
+            # About 199,000 .cif files.
+        obsolete.dat
+    pdb_seqres/                            # ~ 0.2 GB (download: 0.2 GB)
+        pdb_seqres.txt
+    small_bfd/                             # ~ 17 GB (download: 9.6 GB)
+        bfd-first_non_consensus_sequences.fasta
+    uniref30/                              # ~ 206 GB (download: 52.5 GB)
+        # 7 files.
+    uniprot/                               # ~ 105 GB (download: 53 GB)
+        uniprot.fasta
+    uniref90/                              # ~ 67 GB (download: 34 GB)
+        uniref90.fasta
+```
+
+<Note>
+  `bfd/` is only present when using full databases. `small_bfd/` is only present when using the reduced databases preset.
+</Note>
+
+## Individual Download Scripts
+
+Each database can also be downloaded independently using the scripts in `scripts/`:
+
+| Script | Database |
+|---|---|
+| `scripts/download_bfd.sh <DIR>` | Full BFD |
+| `scripts/download_small_bfd.sh <DIR>` | Small BFD (reduced preset) |
+| `scripts/download_mgnify.sh <DIR>` | MGnify |
+| `scripts/download_pdb70.sh <DIR>` | PDB70 |
+| `scripts/download_pdb_mmcif.sh <DIR>` | PDB mmCIF structures |
+| `scripts/download_pdb_seqres.sh <DIR>` | PDB seqres |
+| `scripts/download_uniref30.sh <DIR>` | UniRef30 |
+| `scripts/download_uniprot.sh <DIR>` | UniProt (SwissProt + TrEMBL) |
+| `scripts/download_uniref90.sh <DIR>` | UniRef90 |
+
+## CASP14 Reproducibility Note
+
+The versions downloaded by the scripts are not identical to those used during CASP14. To reproduce CASP14 results as closely as possible, specific historical database versions are required. See [Updating Databases](/data/updating) for the exact versions and URLs.

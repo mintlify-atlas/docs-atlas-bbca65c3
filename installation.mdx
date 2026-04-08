@@ -1,0 +1,115 @@
+---
+title: "Installation"
+description: "How to install AlphaFold and its dependencies using Docker on Linux."
+---
+
+AlphaFold is distributed as a Docker image. This page covers prerequisites, hardware requirements, and the step-by-step installation process.
+
+## Prerequisites
+
+- **Operating system**: Linux only. AlphaFold does not support macOS or Windows.
+- **GPU**: A modern NVIDIA GPU. More GPU memory allows prediction of larger protein structures.
+- **Docker**: [Docker Engine](https://www.docker.com/) must be installed.
+- **NVIDIA Container Toolkit**: Required for GPU access inside Docker containers.
+
+## Hardware requirements
+
+| Resource | Requirement |
+|----------|-------------|
+| Disk space (unzipped) | ~2.62 TB (SSD recommended) |
+| Download size | ~556 GB |
+| RAM (full databases) | 85 GB recommended |
+| RAM (reduced databases) | 8 GB minimum |
+| CPU cores (reduced databases) | 8 vCPUs minimum |
+
+<Warning>
+The download directory for genetic databases must **not** be a subdirectory of the AlphaFold repository. If it is, the Docker build will be very slow because the large databases get copied into the build context.
+</Warning>
+
+## Installation steps
+
+<Steps>
+  <Step title="Install Docker">
+    Install [Docker Engine](https://www.docker.com/) for your Linux distribution.
+
+    After installing Docker, configure it to run without `sudo` so that `run_docker.py` can manage containers as your user:
+
+    ```bash
+    sudo groupadd docker
+    sudo usermod -aG docker $USER
+    newgrp docker
+    ```
+
+    <Note>
+    The `run_docker.py` script runs the container with your current UID and GID by default (via the `--docker_user` flag), so output files will be owned by you rather than root.
+    </Note>
+  </Step>
+
+  <Step title="Install NVIDIA Container Toolkit">
+    Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) to enable GPU access inside Docker containers.
+
+    On Debian/Ubuntu:
+
+    ```bash
+    distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+    curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+    curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list \
+      | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+    sudo systemctl restart docker
+    ```
+
+    Verify GPU access inside Docker:
+
+    ```bash
+    docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+    ```
+
+    The output should list your available GPUs. If it does not, review the NVIDIA Container Toolkit installation steps.
+  </Step>
+
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/deepmind/alphafold.git
+    cd alphafold
+    ```
+  </Step>
+
+  <Step title="Build the Docker image">
+    Build the AlphaFold Docker image from the provided Dockerfile. The image is based on `nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu20.04` and includes all required tools (HMMER, HH-suite, Kalign, Miniconda, JAX, and all Python dependencies).
+
+    ```bash
+    docker build -f docker/Dockerfile -t alphafold .
+    ```
+
+    <Warning>
+    If you encounter a GPG signature error like `NO_PUBKEY A4B469963BF863CC` during the build, refer to the [workaround in the AlphaFold issue tracker](https://github.com/deepmind/alphafold/issues/463#issuecomment-1124881779).
+    </Warning>
+  </Step>
+
+  <Step title="Install run_docker.py dependencies">
+    The `docker/run_docker.py` script manages container lifecycle and mounts. Install its Python dependencies on the host:
+
+    ```bash
+    pip3 install -r docker/requirements.txt
+    ```
+
+    You may optionally create a [Python virtual environment](https://docs.python.org/3/tutorial/venv.html) first to isolate these dependencies from your system Python.
+
+    The `docker/requirements.txt` file includes the `docker` SDK and `absl-py` for flag parsing. The full model dependencies (JAX, Haiku, TensorFlow, etc.) are installed inside the Docker image and do not need to be installed on the host.
+  </Step>
+</Steps>
+
+## Verifying the installation
+
+After completing all steps, confirm that Docker can access your GPU:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+```
+
+You should see a table listing your GPU model, driver version, and CUDA version. If this fails, revisit the NVIDIA Container Toolkit setup before proceeding to download databases and run predictions.
+
+## Alternative: Singularity
+
+If you are working on an HPC cluster where Docker is not available, community-maintained Singularity setups exist. See the discussions in the [AlphaFold GitHub issues](https://github.com/deepmind/alphafold/issues/10) for community-provided Singularity configurations.

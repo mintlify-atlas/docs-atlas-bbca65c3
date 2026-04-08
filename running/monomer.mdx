@@ -1,0 +1,169 @@
+---
+title: "Folding a Monomer"
+description: "Predict the 3D structure of a single protein chain using AlphaFold's monomer pipeline."
+---
+
+AlphaFold's monomer pipeline predicts the structure of a single protein chain. It uses multiple sequence alignments (MSAs) built from genetic databases and structural templates from the PDB to produce a set of ranked structure predictions.
+
+<Steps>
+  <Step title="Prepare your FASTA file">
+    Create a FASTA file containing your single protein sequence. The file must have exactly one sequence entry — a description line beginning with `>` followed by the amino acid sequence on the next line.
+
+    ```fasta
+    >my_protein
+    MAHHHHHHVGTLVTVSSGLVTLATFWLGPQIEFSNLFFPSFGNRSVMLGQNWQPNMTTF
+    ALALFVGSIVGGILYAFKYGFRNPVHTLASAIAIMLFVGYMVEVRNPQHPFNLGLRYHT
+    ```
+
+    <Note>
+      The basename of your FASTA file (without the `.fasta` extension) is used as the name of the output directory for that prediction. All FASTA paths passed in a single run must have unique basenames.
+    </Note>
+  </Step>
+
+  <Step title="Choose a model preset">
+    AlphaFold provides three model presets for monomer prediction. Each uses an ensemble of 5 underlying models but differs in ensembling strategy and output heads.
+
+    <Tabs>
+      <Tab title="monomer">
+        The default preset. Uses the original CASP14 models with no ensembling (`num_ensemble=1`). This is the recommended starting point for most predictions — it offers the best balance of accuracy and speed.
+
+        ```bash
+        python3 docker/run_docker.py \
+          --fasta_paths=my_protein.fasta \
+          --max_template_date=2022-01-01 \
+          --model_preset=monomer \
+          --data_dir=$DOWNLOAD_DIR \
+          --output_dir=/home/user/absolute_path_to_the_output_dir
+        ```
+      </Tab>
+      <Tab title="monomer_ptm">
+        Fine-tuned from the CASP14 models with an additional pTM (predicted TM-score) head. Produces pairwise confidence estimates (`ptm` scalar and `predicted_aligned_error` matrix) alongside the structure. Slightly less accurate than `monomer` on raw structure quality, but provides richer confidence information.
+
+        ```bash
+        python3 docker/run_docker.py \
+          --fasta_paths=my_protein.fasta \
+          --max_template_date=2022-01-01 \
+          --model_preset=monomer_ptm \
+          --data_dir=$DOWNLOAD_DIR \
+          --output_dir=/home/user/absolute_path_to_the_output_dir
+        ```
+      </Tab>
+      <Tab title="monomer_casp14">
+        Reproduces the exact configuration used during CASP14, with `num_ensemble=8`. This is 8× more computationally expensive than `monomer` for a limited accuracy gain (~+0.1 average GDT on CASP14 domains). Provided primarily for reproducibility.
+
+        ```bash
+        python3 docker/run_docker.py \
+          --fasta_paths=my_protein.fasta \
+          --max_template_date=2020-05-14 \
+          --model_preset=monomer_casp14 \
+          --data_dir=$DOWNLOAD_DIR \
+          --output_dir=/home/user/absolute_path_to_the_output_dir
+        ```
+
+        <Warning>
+          `monomer_casp14` uses the same underlying model weights as `monomer` but runs with `num_ensemble=8`, making it significantly slower. Use `monomer` unless you are specifically reproducing CASP14 results.
+        </Warning>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Choose a database preset">
+    The `--db_preset` flag controls which genetic databases are used to build the MSA.
+
+    <Tabs>
+      <Tab title="full_dbs (default)">
+        Uses all genetic databases from CASP14: BFD, UniRef30, MGnify, UniRef90, and PDB70. Requires approximately 2.62 TB of disk space. Recommended for production predictions.
+
+        ```bash
+        python3 docker/run_docker.py \
+          --fasta_paths=my_protein.fasta \
+          --max_template_date=2022-01-01 \
+          --model_preset=monomer \
+          --db_preset=full_dbs \
+          --data_dir=$DOWNLOAD_DIR \
+          --output_dir=/home/user/absolute_path_to_the_output_dir
+        ```
+      </Tab>
+      <Tab title="reduced_dbs">
+        Replaces the full BFD database with `small_bfd`, a much smaller subset. Optimized for speed and lower hardware requirements: 8 CPU cores, 8 GB RAM, and ~600 GB of disk space. Suitable for initial exploration or resource-constrained environments.
+
+        ```bash
+        python3 docker/run_docker.py \
+          --fasta_paths=my_protein.fasta \
+          --max_template_date=2022-01-01 \
+          --model_preset=monomer \
+          --db_preset=reduced_dbs \
+          --data_dir=$DOWNLOAD_DIR \
+          --output_dir=/home/user/absolute_path_to_the_output_dir
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Run the prediction">
+    With Docker installed and the databases downloaded, run the full command. The example below folds a monomer with the recommended defaults:
+
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=my_protein.fasta \
+      --max_template_date=2022-01-01 \
+      --model_preset=monomer \
+      --db_preset=full_dbs \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/absolute_path_to_the_output_dir
+    ```
+
+    Output files will be written to `<output_dir>/my_protein/`. See [Understanding Output](/running/output) for a full description of every file produced.
+  </Step>
+</Steps>
+
+## Folding multiple monomers sequentially
+
+Pass a comma-separated list of FASTA paths to `--fasta_paths` to fold multiple proteins in a single run. AlphaFold processes each one sequentially, writing results to a separate subdirectory named after each FASTA file's basename.
+
+```bash
+python3 docker/run_docker.py \
+  --fasta_paths=monomer1.fasta,monomer2.fasta \
+  --max_template_date=2021-11-01 \
+  --model_preset=monomer \
+  --data_dir=$DOWNLOAD_DIR \
+  --output_dir=/home/user/absolute_path_to_the_output_dir
+```
+
+<Note>
+  All FASTA file basenames must be unique within a single run. The basename (filename without extension) is used as the output subdirectory name for each prediction.
+</Note>
+
+## GPU device selection
+
+By default, AlphaFold attempts to use all visible GPU devices. To restrict which GPUs are used, pass a comma-separated list of GPU UUIDs or indices to `--gpu_devices`:
+
+```bash
+python3 docker/run_docker.py \
+  --fasta_paths=my_protein.fasta \
+  --max_template_date=2022-01-01 \
+  --model_preset=monomer \
+  --data_dir=$DOWNLOAD_DIR \
+  --output_dir=/home/user/absolute_path_to_the_output_dir \
+  --gpu_devices=0,1
+```
+
+This sets the `NVIDIA_VISIBLE_DEVICES` environment variable inside the Docker container. See the [NVIDIA Container Toolkit GPU enumeration docs](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/user-guide.html#gpu-enumeration) for accepted formats.
+
+## Reusing precomputed MSAs
+
+If you want to run predictions with different AlphaFold parameters on the same sequence, you can skip the MSA computation step on subsequent runs using `--use_precomputed_msas=true`. AlphaFold will look for existing MSA files in the output directory.
+
+```bash
+python3 docker/run_docker.py \
+  --fasta_paths=my_protein.fasta \
+  --max_template_date=2022-01-01 \
+  --model_preset=monomer_ptm \
+  --data_dir=$DOWNLOAD_DIR \
+  --output_dir=/home/user/absolute_path_to_the_output_dir \
+  --use_precomputed_msas=true
+```
+
+<Warning>
+  `--use_precomputed_msas=true` does not verify that the sequence, database version, or configuration matches the original run. Use it only when you are certain these have not changed.
+</Warning>

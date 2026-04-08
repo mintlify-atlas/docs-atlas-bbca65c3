@@ -1,0 +1,306 @@
+---
+title: "Understanding Output"
+description: "A complete guide to every file AlphaFold writes after a successful prediction run."
+---
+
+After a prediction completes, AlphaFold writes all output to a subdirectory of `--output_dir` named after the FASTA file's basename. For a file named `my_protein.fasta`, the output will be at `<output_dir>/my_protein/`.
+
+## Directory structure
+
+```
+<target_name>/
+    features.pkl
+    confidence_model_1_pred_0.json         # per-residue pLDDT JSON
+    confidence_model_2_pred_0.json
+    confidence_model_3_pred_0.json
+    confidence_model_4_pred_0.json
+    confidence_model_5_pred_0.json
+    pae_model_1_pred_0.json                # PAE JSON (pTM/multimer models only)
+    ranked_0.pdb
+    ranked_0.cif                           # mmCIF format
+    ranked_1.pdb
+    ranked_1.cif
+    ranked_2.pdb
+    ranked_2.cif
+    ranked_3.pdb
+    ranked_3.cif
+    ranked_4.pdb
+    ranked_4.cif
+    ranking_debug.json
+    relax_metrics.json
+    relaxed_model_3_pred_0.pdb             # only the best-ranked model (default)
+    relaxed_model_3_pred_0.cif
+    result_model_1_pred_0.pkl
+    result_model_2_pred_0.pkl
+    result_model_3_pred_0.pkl
+    result_model_4_pred_0.pkl
+    result_model_5_pred_0.pkl
+    timings.json
+    unrelaxed_model_1_pred_0.pdb
+    unrelaxed_model_1_pred_0.cif
+    unrelaxed_model_2_pred_0.pdb
+    unrelaxed_model_2_pred_0.cif
+    unrelaxed_model_3_pred_0.pdb
+    unrelaxed_model_3_pred_0.cif
+    unrelaxed_model_4_pred_0.pdb
+    unrelaxed_model_4_pred_0.cif
+    unrelaxed_model_5_pred_0.pdb
+    unrelaxed_model_5_pred_0.cif
+    msas/
+        bfd_uniref_hits.a3m
+        mgnify_hits.sto
+        uniref90_hits.sto
+```
+
+<Note>
+  Model output files include a `_pred_0` suffix (e.g. `unrelaxed_model_1_pred_0.pdb`). For monomer runs this is always `_pred_0`. For multimer runs with multiple seeds per model, you will see `_pred_0` through `_pred_N` for each model. Both PDB (`.pdb`) and mmCIF (`.cif`) format structures are written for every prediction.
+</Note>
+
+<Note>
+  The exact set of `relaxed_model_*.pdb` files depends on `--models_to_relax`. With the default (`best`), only the top-ranked model is relaxed, so only one `relaxed_model_*.pdb` is written. With `all`, all five are written. With `none`, no relaxed files are produced.
+</Note>
+
+---
+
+## Output files
+
+<Accordion title="features.pkl">
+  A Python pickle file containing the input feature NumPy arrays used by the models to produce the structures. This includes the MSA representation, template features, and sequence metadata assembled during the data pipeline stage.
+
+  This file is written once per target and shared across all model runs. It can be inspected with:
+
+  ```python
+  import pickle
+  with open('features.pkl', 'rb') as f:
+      features = pickle.load(f)
+  print(features.keys())
+  ```
+</Accordion>
+
+<Accordion title="unrelaxed_model_*.pdb">
+  PDB-format structure files containing the raw predicted structure as output directly by the neural network, before any post-processing. One file is produced per model (five by default).
+
+  The pLDDT per-residue confidence score is stored in the **B-factor column** of each atom record. Higher pLDDT values (closer to 100) indicate higher model confidence for that residue.
+
+  <Warning>
+    Unlike crystallographic B-factors, higher pLDDT is better. Take care when using these files with tools that assume lower B-factors are better (e.g., molecular replacement pipelines).
+  </Warning>
+</Accordion>
+
+<Accordion title="relaxed_model_*.pdb">
+  PDB-format structure files containing predicted structures after Amber relaxation. The relaxation procedure minimizes clashes and improves the local geometry of the predicted structure without substantially changing the overall fold.
+
+  Which models are relaxed is controlled by `--models_to_relax`:
+  - `best` (default) — only the top-ranked model is relaxed
+  - `all` — all five models are relaxed
+  - `none` — no relaxation is performed
+
+  pLDDT values are preserved in the B-factor column.
+</Accordion>
+
+<Accordion title="ranked_*.pdb">
+  PDB-format structure files containing the predicted structures reordered by model confidence. `ranked_0.pdb` has the highest confidence, `ranked_4.pdb` the lowest.
+
+  For all monomer presets (including `monomer_ptm`), ranking is by mean per-residue pLDDT. For the `multimer` preset, ranking uses a combined `0.8 × ipTM + 0.2 × pTM` score (ipTM is only computed by the multimer model). The mapping from `ranked_N` back to the original model name is recorded in `ranking_debug.json`.
+
+  Whether a ranked file contains a relaxed or unrelaxed structure depends on `--models_to_relax`:
+  - `best` — `ranked_0.pdb` is relaxed; all others are unrelaxed
+  - `all` — all ranked files are relaxed
+  - `none` — all ranked files are unrelaxed
+</Accordion>
+
+<Accordion title="ranking_debug.json">
+  A JSON file recording the confidence scores used to rank the models and the mapping from ranked position back to original model name.
+
+  For all monomer presets (including `monomer_ptm`), the key is `plddts` and values are mean pLDDT scores. For the `multimer` preset only, the key is `iptm+ptm` and values are combined `0.8 × ipTM + 0.2 × pTM` scores (because `iptm` is only computed by the multimer model).
+
+  ```json
+  {
+      "plddts": {
+          "model_1_pred_0": 87.3,
+          "model_2_pred_0": 85.1,
+          "model_3_pred_0": 89.2,
+          "model_4_pred_0": 86.7,
+          "model_5_pred_0": 84.9
+      },
+      "order": [
+          "model_3_pred_0",
+          "model_1_pred_0",
+          "model_4_pred_0",
+          "model_2_pred_0",
+          "model_5_pred_0"
+      ]
+  }
+  ```
+</Accordion>
+
+<Accordion title="relax_metrics.json">
+  A JSON file recording metrics from the Amber relaxation step for each relaxed model. Contains the remaining constraint violations after relaxation.
+
+  ```json
+  {
+      "model_3_pred_0": {
+          "remaining_violations": [],
+          "remaining_violations_count": 0
+      }
+  }
+  ```
+
+  This file is only written when `--models_to_relax` is not `none`.
+</Accordion>
+
+<Accordion title="timings.json">
+  A JSON file recording how long each stage of the AlphaFold pipeline took, in seconds. Keys include `features` (data pipeline), `process_features_<model_name>`, `predict_and_compile_<model_name>`, and `relax_<model_name>`.
+
+  When `--benchmark=true` is passed, an additional `predict_benchmark_<model_name>` key is recorded for each model. This is the inference time on the second (compilation-warm) run and is more representative of steady-state throughput.
+
+  ```json
+  {
+      "features": 312.4,
+      "process_features_model_1_pred_0": 1.2,
+      "predict_and_compile_model_1_pred_0": 48.7,
+      "relax_model_3_pred_0": 22.1,
+      "timings.json": 0.0
+  }
+  ```
+</Accordion>
+
+<Accordion title="result_model_*.pkl">
+  Python pickle files containing the raw NumPy arrays produced by each model, including all auxiliary outputs. One file per model run. These files contain more information than the PDB files and are useful for downstream analysis.
+
+  Key fields:
+
+  **`plddt`** — NumPy array of shape `[N_res]` with per-residue pLDDT scores in the range `[0, 100]`. A value of 100 indicates maximum model confidence. Useful for identifying disordered or low-confidence regions. This is the same value written to the B-factor column of the PDB files.
+
+  **`distogram`** — Dictionary with two keys:
+  - `distogram/logits` — NumPy array of shape `[N_res, N_res, N_bins]` containing the raw logits of the predicted distance distribution between residue pairs.
+  - `distogram/bin_edges` — NumPy array defining the bin boundaries for the distance distribution.
+
+  **`ptm`** (pTM models and multimer only) — Scalar predicted TM-score. Designed as a predictor of global superposition quality; assesses whether the model is confident in overall domain packing. Only present when using `monomer_ptm` or `multimer` model presets.
+
+  **`predicted_aligned_error`** (pTM models and multimer only) — NumPy array of shape `[N_res, N_res]` with values in `[0, max_predicted_aligned_error]`. Represents the expected positional error for each residue pair given the predicted alignment. A value of 0 means most confident. Useful for visualising interdomain and interchain confidence. Only present when using `monomer_ptm` or `multimer` model presets.
+
+  ```python
+  import pickle
+  import numpy as np
+
+  # Monomer: result_model_1_pred_0.pkl
+  # Multimer with 5 seeds: result_model_1_multimer_v3_pred_0.pkl through _pred_4.pkl
+  with open('result_model_1_pred_0.pkl', 'rb') as f:
+      result = pickle.load(f)
+
+  mean_plddt = np.mean(result['plddt'])
+  print(f"Mean pLDDT: {mean_plddt:.1f}")
+
+  # For monomer_ptm or multimer models:
+  if 'ptm' in result:
+      print(f"pTM score: {result['ptm']:.3f}")
+  if 'iptm' in result:  # multimer only
+      print(f"ipTM score: {result['iptm']:.3f}")
+  ```
+</Accordion>
+
+<Accordion title="confidence_*.json">
+  Per-model JSON files containing the per-residue pLDDT score and confidence category for each residue. One file is produced per model run, named `confidence_<model_name>.json`.
+
+  The format matches the AlphaFold Database (AFDB) confidence JSON format:
+
+  ```json
+  {
+    "residueNumber": [1, 2, 3, ...],
+    "confidenceScore": [92.34, 87.12, 45.67, ...],
+    "confidenceCategory": ["H", "M", "D", ...]
+  }
+  ```
+
+  Categories are: `H` (high, 90–100), `M` (medium, 70–90), `L` (low, 50–70), `D` (disordered, < 50).
+</Accordion>
+
+<Accordion title="pae_*.json">
+  Per-model JSON files containing the Predicted Aligned Error (PAE) matrix. Only produced for `monomer_ptm` and `multimer` model presets. Named `pae_<model_name>.json`.
+
+  The format matches the AFDB PAE format:
+
+  ```json
+  [{"predicted_aligned_error": [[0.5, 2.3, ...], ...], "max_predicted_aligned_error": 31.75}]
+  ```
+
+  Values are in Ångströms, rounded to 1 decimal place. Use this to assess domain packing and inter-chain interface confidence.
+</Accordion>
+
+<Accordion title="*.cif (mmCIF format)">
+  All predicted structures are also written in mmCIF format alongside the PDB files. For every `unrelaxed_model_*.pdb`, `relaxed_model_*.pdb`, and `ranked_*.pdb`, a corresponding `.cif` file is written with the same structure data in mmCIF format.
+
+  mmCIF files can be opened in molecular visualization tools such as ChimeraX, PyMOL (version 2.0+), and COOT.
+</Accordion>
+
+<Accordion title="msas/ directory">
+  A directory containing the raw output files from the MSA and template search tools. These record every sequence alignment hit found across all genetic databases.
+
+  Files present vary by database preset:
+
+  **`full_dbs` preset:**
+  - `uniref90_hits.sto` — JackHMMER hits against UniRef90 (Stockholm format)
+  - `mgnify_hits.sto` — JackHMMER hits against MGnify (Stockholm format)
+  - `bfd_uniref_hits.a3m` — HHblits hits against BFD + UniRef30 (A3M format)
+
+  **`reduced_dbs` preset:**
+  - `uniref90_hits.sto` — JackHMMER hits against UniRef90
+  - `mgnify_hits.sto` — JackHMMER hits against MGnify
+  - `small_bfd_hits.sto` — JackHMMER hits against small BFD
+
+  These files are used as the source when `--use_precomputed_msas=true` is set on a subsequent run.
+</Accordion>
+
+---
+
+## pLDDT confidence scores
+
+The per-residue pLDDT (predicted Local Distance Difference Test) score is AlphaFold's primary per-residue confidence measure. It ranges from 0 to 100, where 100 is most confident.
+
+pLDDT is stored in the **B-factor column** of every output PDB file (both unrelaxed and relaxed). This allows standard molecular visualization tools like PyMOL or ChimeraX to color structures by confidence without any preprocessing.
+
+**Interpretation guidelines** (from the AlphaFold database):
+
+| pLDDT range | Confidence |
+|---|---|
+| > 90 | Very high — confident backbone and sidechains |
+| 70 – 90 | High — confident backbone |
+| 50 – 70 | Low — use with caution |
+| < 50 | Very low — likely disordered or structurally unreliable |
+
+<Warning>
+  Standard crystallography tools assume lower B-factors indicate more reliable positions. pLDDT is the opposite — higher is better. Be careful when using AlphaFold PDB files with B-factor-based filtering in molecular replacement or refinement pipelines.
+</Warning>
+
+---
+
+## Prediction performance
+
+The table below shows prediction runtimes on a single NVIDIA A100 GPU for proteins of various lengths. Times are for unrelaxed structure prediction with 3 recycles, excluding MSA and template search. When `--benchmark=true` is set, the compilation-excluded time is recorded in `timings.json`.
+
+| Residues | Prediction time (s) |
+|---:|---:|
+| 100 | 4.9 |
+| 200 | 7.7 |
+| 300 | 13 |
+| 400 | 18 |
+| 500 | 29 |
+| 600 | 36 |
+| 700 | 53 |
+| 800 | 60 |
+| 900 | 91 |
+| 1,000 | 96 |
+| 1,100 | 140 |
+| 1,500 | 280 |
+| 2,000 | 450 |
+| 2,500 | 969 |
+| 3,000 | 1,240 |
+| 3,500 | 2,465 |
+| 4,000 | 5,660 |
+| 4,500 | 12,475 |
+| 5,000 | 18,824 |
+
+<Tip>
+  For small proteins, compilation time is a significant fraction of total runtime on the first run. Use `--benchmark=true` to measure the true inference speed, or pad inputs to a fixed size using `make_fixed_size` to reduce recompilation overhead when predicting many proteins.
+</Tip>

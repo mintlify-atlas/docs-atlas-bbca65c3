@@ -1,0 +1,62 @@
+---
+title: "Introduction"
+description: "AlphaFold is an AI system developed by DeepMind that predicts protein 3D structures from amino acid sequences with high accuracy."
+---
+
+AlphaFold is an implementation of the inference pipeline of AlphaFold v2, a protein structure prediction system developed by Google DeepMind. It was entered as AlphaFold2 in CASP14 and published in *Nature*, where it demonstrated unprecedented accuracy in predicting how proteins fold into their three-dimensional shapes.
+
+Proteins are the molecular machines of life, and their function is determined by their 3D structure. Determining protein structure experimentally is expensive and time-consuming. AlphaFold solves this problem computationally—given only an amino acid sequence, it can predict the 3D structure with accuracy competitive with experimental methods.
+
+## What AlphaFold can do
+
+<CardGroup cols={2}>
+  <Card title="Monomer prediction" icon="dna">
+    Predict the 3D structure of a single protein chain from its amino acid sequence. Three model presets are available: `monomer`, `monomer_casp14`, and `monomer_ptm`.
+  </Card>
+  <Card title="Multimer prediction" icon="circle-nodes">
+    Predict the structure of protein complexes containing multiple chains, including homomers and heteromers, using the AlphaFold-Multimer model.
+  </Card>
+  <Card title="Confidence metrics" icon="chart-bar">
+    Each prediction includes per-residue pLDDT scores (0–100), predicted TM-score (pTM), and predicted aligned error (PAE) for pTM models, so you can assess prediction quality.
+  </Card>
+  <Card title="Amber relaxation" icon="atom">
+    After structure prediction, AlphaFold runs an optional Amber relaxation step to improve local geometry. By default, only the best model is relaxed.
+  </Card>
+</CardGroup>
+
+## How it works
+
+AlphaFold's architecture has two main components:
+
+**Evoformer** — The core neural network block that processes multiple sequence alignments (MSAs) and pairwise residue features together. It iteratively refines a representation of which residues are likely to be close together in 3D space, drawing on evolutionary information from thousands of related sequences across the tree of life.
+
+**Structure module** — Takes the Evoformer output and constructs an explicit 3D atomic model of the protein. It represents each residue as a rigid-body frame and iteratively refines residue positions and orientations until a consistent 3D structure emerges.
+
+The model searches several genetic databases (BFD, MGnify, UniRef90, UniRef30, PDB70, and others) to build the input MSA and identify structural templates before running the neural network.
+
+## Papers
+
+AlphaFold is described in two publications:
+
+- **AlphaFold (monomer)**: Jumper et al. (2021). [Highly accurate protein structure prediction with AlphaFold](https://doi.org/10.1038/s41586-021-03819-2). *Nature*, 596, 583–589.
+- **AlphaFold-Multimer**: Evans et al. (2021). [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034v1). *bioRxiv*.
+
+Any publication using this code or model parameters should cite the AlphaFold paper and, if applicable, the AlphaFold-Multimer paper.
+
+## Hardware requirements
+
+AlphaFold requires Linux and a modern NVIDIA GPU. GPU memory determines the maximum protein length you can predict. The full genetic databases require approximately **2.62 TB of disk space** (556 GB download). SSD storage is strongly recommended for genetic search performance.
+
+The reference setup used for benchmarking is a Google Cloud machine with 12 vCPUs, 85 GB RAM, a 100 GB boot disk, a 3 TB database disk, and an A100 GPU.
+
+A reduced database preset (`reduced_dbs`) is available that requires only 8 CPU cores, 8 GB RAM, and 600 GB of disk space, at the cost of some prediction accuracy.
+
+## License
+
+The AlphaFold **code** is licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+The AlphaFold **model parameters** and CASP15 prediction data are available under the [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/legalcode) license.
+
+<Warning>
+AlphaFold and its outputs are for theoretical modeling only. They are not intended, validated, or approved for clinical use. Do not use AlphaFold for clinical purposes or rely on it for medical or other professional advice.
+</Warning>

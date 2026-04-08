@@ -1,0 +1,140 @@
+---
+title: "Model Parameters"
+description: "AlphaFold neural network weights, licensing, and how to download current and deprecated versions."
+---
+
+AlphaFold's learned weights are distributed separately from the source code. The current release includes parameters for three families of models: the original CASP14 monomer models, pTM variants, and the AlphaFold-Multimer v3 models.
+
+## License
+
+<Note>
+  The AlphaFold model parameters are licensed under the **Creative Commons Attribution 4.0 International (CC BY 4.0)** license — a different license from the source code, which is Apache 2.0.
+
+  See the full terms at https://creativecommons.org/licenses/by/4.0/legalcode.
+</Note>
+
+## Included Parameters
+
+The current parameter package (`alphafold_params_2022-12-06.tar`) contains 15 model checkpoint files and a LICENSE file (16 files total, ~5.3 GB):
+
+| Model set | Count | Names | Notes |
+|---|---|---|---|
+| CASP14 monomer models | 5 | `model_1` through `model_5` | Used at CASP14; extensively validated for structure prediction quality |
+| pTM models | 5 | `model_1_ptm` through `model_5_ptm` | Fine-tuned to output pTM score and PAE (predicted aligned error) |
+| AlphaFold-Multimer v3 | 5 | `model_1_multimer_v3` through `model_5_multimer_v3` | Produce pTM and PAE alongside structure predictions for complexes |
+
+### CASP14 monomer models
+
+These are the original models submitted to CASP14 with no ensembling (`--model_preset=monomer`). They were extensively validated on the CASP14 target set. See Jumper et al. 2021, Supplementary Methods 1.12 for architectural details.
+
+### pTM models
+
+Fine-tuned variants of the CASP14 models with an added pTM head (`--model_preset=monomer_ptm`). These output a predicted TM-score (pTM) and predicted pairwise aligned error (PAE) in addition to the 3D coordinates. They are slightly less accurate than the base monomer models on structure prediction metrics, but provide richer confidence information. See Jumper et al. 2021, Supplementary Methods 1.9.7.
+
+### AlphaFold-Multimer v3 models
+
+Models trained for protein complex prediction (`--model_preset=multimer`). They also produce pTM and PAE values. By default, AlphaFold runs all 5 multimer models with 5 seeds each (25 total predictions); this can be reduced with `--num_multimer_predictions_per_model=1`.
+
+## Downloading Parameters
+
+### Via `download_all_data.sh` (recommended)
+
+Parameters are downloaded automatically when you run the full data download script:
+
+```bash
+scripts/download_all_data.sh <DOWNLOAD_DIR>
+```
+
+This places the parameters in `<DOWNLOAD_DIR>/params/`.
+
+### Via `download_alphafold_params.sh` (standalone)
+
+To download only the parameters without re-downloading all databases:
+
+```bash
+scripts/download_alphafold_params.sh <DOWNLOAD_DIR>
+```
+
+The script fetches the archive from Google Cloud Storage and extracts it into `<DOWNLOAD_DIR>/params/`:
+
+```
+https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar
+```
+
+The archive is extracted with `--preserve-permissions` and the tarball is removed afterward.
+
+## params/ Directory Layout
+
+```
+$DOWNLOAD_DIR/
+    params/                    # ~ 5.3 GB (download: 5.3 GB)
+        params_model_1.npz
+        params_model_2.npz
+        params_model_3.npz
+        params_model_4.npz
+        params_model_5.npz
+        params_model_1_ptm.npz
+        params_model_2_ptm.npz
+        params_model_3_ptm.npz
+        params_model_4_ptm.npz
+        params_model_5_ptm.npz
+        params_model_1_multimer_v3.npz
+        params_model_2_multimer_v3.npz
+        params_model_3_multimer_v3.npz
+        params_model_4_multimer_v3.npz
+        params_model_5_multimer_v3.npz
+        LICENSE
+```
+
+## Using Deprecated Model Weights
+
+<Accordion title="Deprecated v2.2.0 AlphaFold-Multimer weights">
+
+To use the v2.2.0 AlphaFold-Multimer model weights:
+
+1. Edit `scripts/download_alphafold_params.sh` and change the `SOURCE_URL` line to:
+
+   ```bash
+   SOURCE_URL="https://storage.googleapis.com/alphafold/alphafold_params_2022-03-02.tar"
+   ```
+
+2. Run the script to download the old parameters:
+
+   ```bash
+   scripts/download_alphafold_params.sh <DOWNLOAD_DIR>
+   ```
+
+3. In `alphafold/model/config.py`, change `_v3` to `_v2` in the multimer `MODEL_PRESETS` dictionary.
+
+</Accordion>
+
+<Accordion title="Deprecated v2.1.0 AlphaFold-Multimer weights">
+
+To use the v2.1.0 AlphaFold-Multimer model weights:
+
+1. Edit `scripts/download_alphafold_params.sh` and change the `SOURCE_URL` line to:
+
+   ```bash
+   SOURCE_URL="https://storage.googleapis.com/alphafold/alphafold_params_2022-01-19.tar"
+   ```
+
+2. Run the script to download the old parameters:
+
+   ```bash
+   scripts/download_alphafold_params.sh <DOWNLOAD_DIR>
+   ```
+
+3. In `alphafold/model/config.py`, remove the `_v3` suffix from the multimer `MODEL_PRESETS` dictionary entries.
+
+</Accordion>
+
+## Updating Parameters
+
+When upgrading AlphaFold to a new version, remove the old parameters before downloading the new ones to avoid mixing incompatible weights:
+
+```bash
+rm -rf <DOWNLOAD_DIR>/params
+scripts/download_alphafold_params.sh <DOWNLOAD_DIR>
+```
+
+For a complete step-by-step upgrade procedure, see [Updating Databases](/data/updating).

@@ -1,80 +1,166 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Run your first AlphaFold protein structure prediction in minutes."
 ---
 
-## Get started in three steps
+This guide walks you through running your first protein structure prediction with AlphaFold. By the end, you will have predicted the 3D structure of a protein and understand the output files.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  AlphaFold requires a Linux machine with a modern NVIDIA GPU. The full database download is approximately 556 GB (2.62 TB unzipped). Make sure you have sufficient disk space before proceeding.
+</Note>
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Clone the repository">
+    Clone the AlphaFold repository and navigate into it:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    git clone https://github.com/google-deepmind/alphafold.git
+    cd alphafold
+    ```
+  </Step>
 
-### Step 2: Deploy your changes
+  <Step title="Download genetic databases and model parameters">
+    Run the download script to fetch all required databases and model parameters. This may take substantial time (download size is 556 GB):
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    scripts/download_all_data.sh <DOWNLOAD_DIR> > download.log 2> download_all.log &
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    Replace `<DOWNLOAD_DIR>` with the path where you want to store the data (e.g., `/data/alphafold`).
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    <Warning>
+      The download directory must **not** be inside the AlphaFold repository directory. If it is, the Docker build will be very slow because the large databases will be copied into the Docker build context.
+    </Warning>
 
-### Step 3: Go live
+    <Tip>
+      To download a reduced set of databases (~600 GB total disk space) for faster setup, use:
+      ```bash
+      scripts/download_all_data.sh <DOWNLOAD_DIR> reduced_dbs
+      ```
+      Then add `--db_preset=reduced_dbs` to your prediction command.
+    </Tip>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    After the download completes, your directory will have this structure:
+
+    ```
+    $DOWNLOAD_DIR/                             # Total: ~ 2.62 TB (download: 556 GB)
+        bfd/                                   # ~ 1.8 TB (download: 271.6 GB)
+        mgnify/                                # ~ 120 GB (download: 67 GB)
+        params/                                # ~ 5.3 GB (download: 5.3 GB)
+        pdb70/                                 # ~ 56 GB (download: 19.5 GB)
+        pdb_mmcif/                             # ~ 238 GB (download: 43 GB)
+        pdb_seqres/                            # ~ 0.2 GB (download: 0.2 GB)
+        small_bfd/                             # ~ 17 GB (download: 9.6 GB)
+        uniref30/                              # ~ 206 GB (download: 52.5 GB)
+        uniprot/                               # ~ 105 GB (download: 53 GB)
+        uniref90/                              # ~ 67 GB (download: 34 GB)
+    ```
+  </Step>
+
+  <Step title="Build the Docker image">
+    Build the AlphaFold Docker image:
+
+    ```bash
+    docker build -f docker/Dockerfile -t alphafold .
+    ```
+
+    Then install the host-side Python dependencies for the Docker runner script:
+
+    ```bash
+    pip3 install -r docker/requirements.txt
+    ```
+
+    Verify your GPU is accessible:
+
+    ```bash
+    docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
+    ```
+
+    You should see a list of your NVIDIA GPUs. If not, check your [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installation.
+  </Step>
+
+  <Step title="Prepare your protein sequence">
+    Create a FASTA file containing the protein sequence you want to fold. For example, create `my_protein.fasta`:
+
+    ```fasta
+    >my_protein
+    MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRLSPLHSVYVDQWDWERVMGDGERQFSTLKSTVEAIWAGIKATEAAVSEEFGLAPFLPDQIHFVHSQELLSRYPDLDAKGRERAIAKDLGAVFLVGIGGKLSDGHRHDVRAPDYDDWSTPSELGHAGLNGDILVWNPVLEDAFELSSMGIRVDADTLKHQLALTGDEDRLELEWHQALLRGEMPQTIGGGIGQSRLTMLLLQLPHIGQVQAGVWPAAVRESVPSLL
+    ```
+
+    <Note>
+      For multimer predictions (protein complexes), include multiple sequences in the same FASTA file. See [Folding a Multimer](/running/multimer) for details.
+    </Note>
+  </Step>
+
+  <Step title="Run AlphaFold">
+    Run AlphaFold using the Docker script. Set `$DOWNLOAD_DIR` to the path where you downloaded the databases:
+
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=my_protein.fasta \
+      --max_template_date=2022-01-01 \
+      --model_preset=monomer \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/alphafold_output
+    ```
+
+    Make sure the output directory exists and you have write permissions:
+
+    ```bash
+    mkdir -p /home/user/alphafold_output
+    ```
+
+    <Tip>
+      By default, AlphaFold uses all visible GPU devices. To use a specific GPU, add `--gpu_devices=0` (or a comma-separated list of GPU indices).
+    </Tip>
+  </Step>
+
+  <Step title="Examine the output">
+    When the run completes, your output directory will contain:
+
+    ```
+    my_protein/
+        features.pkl              # Input features used by the model
+        ranked_0.pdb              # Best structure prediction
+        ranked_1.pdb              # Second best prediction
+        ranked_2.pdb
+        ranked_3.pdb
+        ranked_4.pdb
+        ranking_debug.json        # pLDDT scores used for ranking
+        relax_metrics.json        # Amber relaxation metrics
+        relaxed_model_1.pdb       # Relaxed structures
+        result_model_1.pkl        # Raw model outputs (pLDDT, PAE, etc.)
+        timings.json              # Time per pipeline stage
+        unrelaxed_model_1.pdb     # Unrelaxed structures
+        msas/
+            bfd_uniref_hits.a3m   # BFD+UniRef MSA
+            mgnify_hits.sto       # MGnify MSA
+            uniref90_hits.sto     # UniRef90 MSA
+    ```
+
+    Open `ranked_0.pdb` in a molecular viewer (e.g., PyMOL, ChimeraX) to visualize the predicted structure. The B-factor column contains per-residue pLDDT confidence scores:
+    - **90–100**: Very high confidence (dark blue)
+    - **70–90**: Confident (light blue)
+    - **50–70**: Low confidence (yellow)
+    - **< 50**: Very low confidence / disordered (orange)
+
+    See [Understanding Output](/running/output) for a full description of all output files.
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Folding a Monomer" icon="dna" href="/running/monomer">
+    Explore all model presets, database options, and advanced monomer prediction settings.
+  </Card>
+  <Card title="Folding a Multimer" icon="circle-nodes" href="/running/multimer">
+    Predict the structure of protein complexes with AlphaFold-Multimer.
+  </Card>
+  <Card title="Understanding Output" icon="file-export" href="/running/output">
+    Learn what each output file contains and how to interpret confidence scores.
+  </Card>
+  <Card title="Configuration Reference" icon="sliders" href="/running/configuration">
+    Explore all available flags and configuration options.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

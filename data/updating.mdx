@@ -1,0 +1,151 @@
+---
+title: "Updating Databases"
+description: "How to incrementally update AlphaFold's genetic databases and model parameters when upgrading to a new version."
+---
+
+When a new version of AlphaFold is released, or when you want to keep your databases current, you can perform an incremental update without re-downloading everything from scratch. This is significantly faster than a full reinstall.
+
+The steps below must be followed **in the exact order listed**. Some databases (PDB mmCIF and PDB seqres) have a strict synchronization requirement that can cause silent failures if violated.
+
+<Warning>
+  PDB mmCIF and PDB seqres **must be downloaded on the same day**. AlphaFold-Multimer matches seqres entries to mmCIF structure files by PDB ID; if the two databases are from different dates, some entries will be missing and template search will fail. Always update them together in a single session.
+</Warning>
+
+## Update Procedure
+
+<Steps>
+  <Step title="Update the code">
+    Pull the latest AlphaFold source from the main branch:
+
+    ```bash
+    cd /path/to/alphafold
+    git fetch origin main
+    git checkout main
+    git pull
+    ```
+  </Step>
+
+  <Step title="Update UniProt">
+    UniProt is used by AlphaFold-Multimer for cross-species sequence pairing. Remove the existing directory before re-downloading to avoid mixing versions:
+
+    ```bash
+    rm -rf <DOWNLOAD_DIR>/uniprot
+    scripts/download_uniprot.sh <DOWNLOAD_DIR>
+    ```
+
+    The script downloads and merges both SwissProt and TrEMBL into a single `uniprot.fasta` file (~105 GB unzipped).
+  </Step>
+
+  <Step title="Update UniRef30">
+    UniRef30 (formerly UniClust30) is used by HHblits for MSA construction:
+
+    ```bash
+    rm -rf <DOWNLOAD_DIR>/uniref30
+    scripts/download_uniref30.sh <DOWNLOAD_DIR>
+    ```
+
+    <Note>
+      The README refers to the directory as `uniclust30` in older instructions. The current script writes to `uniref30/`. Remove whichever directory name is present in your installation.
+    </Note>
+  </Step>
+
+  <Step title="Update UniRef90">
+    UniRef90 is used by Jackhmmer for close-homolog MSA construction:
+
+    ```bash
+    rm -rf <DOWNLOAD_DIR>/uniref90
+    scripts/download_uniref90.sh <DOWNLOAD_DIR>
+    ```
+  </Step>
+
+  <Step title="Update MGnify">
+    MGnify provides metagenomics sequences that extend MSA coverage beyond well-characterized organisms:
+
+    ```bash
+    rm -rf <DOWNLOAD_DIR>/mgnify
+    scripts/download_mgnify.sh <DOWNLOAD_DIR>
+    ```
+  </Step>
+
+  <Step title="Update PDB mmCIF and PDB seqres">
+    These two databases must be updated together. Remove PDB mmCIF first, then download both in sequence without interruption:
+
+    ```bash
+    rm -rf <DOWNLOAD_DIR>/pdb_mmcif
+    scripts/download_pdb_mmcif.sh <DOWNLOAD_DIR>
+    scripts/download_pdb_seqres.sh <DOWNLOAD_DIR>
+    ```
+
+    The PDB mmCIF download uses `rsync` from `rsync.rcsb.org` and fetches approximately 199,000 `.cif` files (~238 GB unzipped). If the default mirror is slow, alternative mirrors are available:
+
+    ```
+    rsync.ebi.ac.uk::pub/databases/pdb/data/structures/divided/mmCIF/  (Europe)
+    ftp.pdbj.org::ftp_data/structures/divided/mmCIF/                   (Asia)
+    ```
+
+    See https://www.wwpdb.org/ftp/pdb-ftp-sites for a full list of mirrors.
+  </Step>
+
+  <Step title="Update model parameters">
+    Remove the old parameter files before downloading new ones to prevent mixing incompatible weights:
+
+    ```bash
+    rm -rf <DOWNLOAD_DIR>/params
+    scripts/download_alphafold_params.sh <DOWNLOAD_DIR>
+    ```
+
+    The current parameters are fetched from:
+
+    ```
+    https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar
+    ```
+  </Step>
+
+  <Step title="Rebuild and run">
+    After all databases and parameters are updated, rebuild the Docker image and run AlphaFold as normal:
+
+    ```bash
+    docker build -f docker/Dockerfile -t alphafold .
+
+    python3 docker/run_docker.py \
+      --fasta_paths=your_protein.fasta \
+      --max_template_date=2022-01-01 \
+      --data_dir=$DOWNLOAD_DIR \
+      --output_dir=/home/user/absolute_path_to_the_output_dir
+    ```
+  </Step>
+</Steps>
+
+## Databases Not Requiring Updates
+
+**BFD** (Big Fantastic Database) is a static database — there is only one version available. You do not need to update it when upgrading AlphaFold.
+
+**PDB70** is also generally stable across AlphaFold versions and does not need to be updated unless explicitly noted in the release.
+
+## CASP14 Reproducibility
+
+AlphaFold's output for a small number of proteins has high inter-run variance and is sensitive to changes in the input databases (CASP14 target T1064 is a notable example, due to the large influx of SARS-CoV-2 sequences). Running all 5 models and selecting the most confident prediction mitigates this somewhat.
+
+To reproduce the exact CASP14 results, you must use the specific database versions that were used during the competition. The current download scripts do **not** fetch these historical versions by default.
+
+<Accordion title="Historical database versions for CASP14 reproduction">
+
+**Genetics databases:**
+
+| Database | Version | URL |
+|---|---|---|
+| UniRef90 | v2020_01 | https://ftp.uniprot.org/pub/databases/uniprot/previous_releases/release-2020_01/uniref/ |
+| MGnify | v2018_12 | http://ftp.ebi.ac.uk/pub/databases/metagenomics/peptide_database/2018_12/ |
+| UniClust30 | v2018_08 | http://wwwuser.gwdg.de/~compbiol/uniclust/2018_08/ |
+| BFD | (only one version) | https://bfd.mmseqs.com/ |
+
+**Template databases:**
+
+| Database | Version |
+|---|---|
+| PDB | Downloaded 2020-05-14 |
+| PDB70 | 2020-05-13 ([direct link](http://wwwuser.gwdg.de/~compbiol/data/hhsuite/databases/hhsuite_dbs/old-releases/pdb70_from_mmcif_200513.tar.gz)) |
+
+**Alternative approach:** Use the latest PDB and PDB70 but restrict templates to structures available at the start of CASP14 by passing `--max_template_date=2020-05-14` to `run_docker.py`. This avoids downloading historical PDB snapshots while approximately reproducing the CASP14 template pool.
+
+</Accordion>

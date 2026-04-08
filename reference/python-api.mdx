@@ -1,0 +1,851 @@
+---
+title: "Python API Reference"
+description: "Comprehensive reference for AlphaFold's public Python APIs, including model inference, data pipelines, relaxation, confidence metrics, and protein structure utilities."
+---
+
+This page documents the public Python APIs exposed by AlphaFold. All modules live under the `alphafold` package. Import paths are given for each class and function.
+
+---
+
+## alphafold.model.model
+
+### `RunModel`
+
+```python
+from alphafold.model import model
+```
+
+Container for the JAX-compiled AlphaFold model. Wraps a Haiku-transformed forward function and provides methods for feature processing and prediction.
+
+#### Constructor
+
+```python
+RunModel(
+    config: ml_collections.ConfigDict,
+    params: Optional[Mapping[str, Mapping[str, jax.Array]]] = None,
+)
+```
+
+<ParamField path="config" type="ml_collections.ConfigDict" required>
+  A model configuration dict as returned by `alphafold.model.config.model_config(name)`. The `config.model.global_config.multimer_mode` field determines whether to instantiate the monomer or multimer forward function.
+</ParamField>
+
+<ParamField path="params" type="Optional[Mapping[str, Mapping[str, jax.Array]]]">
+  Pre-trained Haiku parameter dict, typically loaded with `alphafold.model.data.get_model_haiku_params`. If `None`, parameters are randomly initialised on the first call to `predict` or `init_params`.
+</ParamField>
+
+**Example**
+
+```python
+from alphafold.model import config, data, model
+
+model_name = 'model_1_ptm'
+model_cfg = config.model_config(model_name)
+params = data.get_model_haiku_params(model_name=model_name, data_dir='/data/alphafold')
+
+runner = model.RunModel(model_cfg, params)
+```
+
+#### `predict`
+
+```python
+RunModel.predict(
+    feat: features.FeatureDict,
+    random_seed: int,
+) -> Mapping[str, Any]
+```
+
+Makes a prediction by running the JAX model on the provided feature arrays.
+
+<ParamField path="feat" type="features.FeatureDict" required>
+  A dictionary of NumPy arrays as returned by `RunModel.process_features`. For the multimer model, raw pipeline output can be passed directly.
+</ParamField>
+
+<ParamField path="random_seed" type="int" required>
+  Controls the JAX PRNG key. In the multimer model this also seeds MSA sampling during recycling. Using different seeds with the same model produces different predictions.
+</ParamField>
+
+<ResponseField name="result" type="Mapping[str, Any]">
+  Nested dictionary of model outputs. Always includes:
+
+  - `plddt` — `np.ndarray` of shape `[num_res]`, per-residue pLDDT on a 0–100 scale.
+  - `ranking_confidence` — scalar used to rank models (mean pLDDT for monomer; `0.8 * iptm + 0.2 * ptm` for multimer).
+  - `structure_module` — dict containing `final_atom_positions` (`[num_res, 37, 3]`) and `final_atom_mask` (`[num_res, 37]`).
+
+  Present only for pTM / multimer models:
+
+  - `predicted_aligned_error` — `[num_res, num_res]` PAE array.
+  - `max_predicted_aligned_error` — scalar maximum possible PAE.
+  - `ptm` — scalar predicted TM-score.
+  - `iptm` — scalar interface pTM score (multimer only).
+</ResponseField>
+
+**Example**
+
+```python
+import random
+
+processed = runner.process_features(feature_dict, random_seed=42)
+result = runner.predict(processed, random_seed=42)
+
+print(f"Mean pLDDT: {result['plddt'].mean():.1f}")
+print(f"Ranking confidence: {result['ranking_confidence']:.3f}")
+```
+
+#### `process_features`
+
+```python
+RunModel.process_features(
+    raw_features: features.FeatureDict,
+    random_seed: int,
+) -> features.FeatureDict
+```
+
+Prepares raw pipeline features for model input. For the monomer model this applies cropping, MSA subsampling and other data transformations. For the multimer model the features are returned unchanged.
+
+<ParamField path="raw_features" type="features.FeatureDict" required>
+  Output of a `DataPipeline.process` call.
+</ParamField>
+
+<ParamField path="random_seed" type="int" required>
+  Random seed used for stochastic data augmentation steps such as MSA masking.
+</ParamField>
+
+#### `init_params`
+
+```python
+RunModel.init_params(
+    feat: features.FeatureDict,
+    random_seed: int = 0,
+)
+```
+
+Initialises model parameters from a feature batch. Called automatically by `predict` if no params were supplied at construction time.
+
+---
+
+### `get_confidence_metrics`
+
+```python
+from alphafold.model.model import get_confidence_metrics
+
+get_confidence_metrics(
+    prediction_result: Mapping[str, Any],
+    multimer_mode: bool,
+) -> Mapping[str, Any]
+```
+
+Post-processes raw model output to produce confidence metrics. This is called automatically inside `RunModel.predict`.
+
+<ParamField path="prediction_result" type="Mapping[str, Any]" required>
+  Raw model output dict containing at minimum `predicted_lddt.logits` and optionally `predicted_aligned_error.{logits,breaks,asym_id}`.
+</ParamField>
+
+<ParamField path="multimer_mode" type="bool" required>
+  When `True`, computes ipTM and uses `0.8 * iptm + 0.2 * ptm` as the ranking confidence. When `False`, uses mean pLDDT.
+</ParamField>
+
+<ResponseField name="confidence_metrics" type="Mapping[str, Any]">
+  Always contains `plddt` and `ranking_confidence`. For pTM / multimer models also contains `aligned_confidence_probs`, `predicted_aligned_error`, `max_predicted_aligned_error`, and `ptm`. For multimer also `iptm`.
+</ResponseField>
+
+---
+
+## alphafold.data.pipeline
+
+```python
+from alphafold.data import pipeline
+```
+
+### `DataPipeline`
+
+Runs alignment tools (JackHMMER, HHblits) and assembles input features for the **monomer** AlphaFold model.
+
+#### Constructor
+
+```python
+DataPipeline(
+    *,
+    jackhmmer_binary_path: str,
+    hhblits_binary_path: str,
+    uniref90_database_path: str,
+    mgnify_database_path: str,
+    bfd_database_path: Optional[str],
+    uniref30_database_path: Optional[str],
+    small_bfd_database_path: Optional[str],
+    template_searcher: TemplateSearcher,
+    template_featurizer: templates.TemplateHitFeaturizer,
+    use_small_bfd: bool,
+    mgnify_max_hits: int = 501,
+    uniref_max_hits: int = 10000,
+    use_precomputed_msas: bool = False,
+    msa_tools_n_cpu: int = 8,
+)
+```
+
+<ParamField path="jackhmmer_binary_path" type="str" required>
+  Path to the `jackhmmer` executable. Used to search Uniref90 and MGnify databases.
+</ParamField>
+
+<ParamField path="hhblits_binary_path" type="str" required>
+  Path to the `hhblits` executable. Used to search BFD and UniRef30 when `use_small_bfd=False`.
+</ParamField>
+
+<ParamField path="uniref90_database_path" type="str" required>
+  Path to the Uniref90 FASTA database file.
+</ParamField>
+
+<ParamField path="mgnify_database_path" type="str" required>
+  Path to the MGnify FASTA database file.
+</ParamField>
+
+<ParamField path="bfd_database_path" type="Optional[str]">
+  Path to the BFD database (used with `use_small_bfd=False`). Required when running with `full_dbs` preset.
+</ParamField>
+
+<ParamField path="uniref30_database_path" type="Optional[str]">
+  Path to the UniRef30 database prefix (used with `use_small_bfd=False`).
+</ParamField>
+
+<ParamField path="small_bfd_database_path" type="Optional[str]">
+  Path to the small BFD database FASTA (used with `use_small_bfd=True` i.e. `reduced_dbs` preset).
+</ParamField>
+
+<ParamField path="template_searcher" type="TemplateSearcher" required>
+  Either an `HHSearch` or `Hmmsearch` instance used to find structural templates.
+</ParamField>
+
+<ParamField path="template_featurizer" type="templates.TemplateHitFeaturizer" required>
+  Featurizer that converts template search hits to model input arrays.
+</ParamField>
+
+<ParamField path="use_small_bfd" type="bool" required>
+  When `True`, uses JackHMMER against the small BFD. When `False`, uses HHblits against the full BFD + UniRef30.
+</ParamField>
+
+<ParamField path="mgnify_max_hits" type="int">
+  Maximum sequences to keep from the MGnify MSA. Default: `501`.
+</ParamField>
+
+<ParamField path="uniref_max_hits" type="int">
+  Maximum sequences to keep from the Uniref90 MSA. Default: `10000`.
+</ParamField>
+
+<ParamField path="use_precomputed_msas" type="bool">
+  When `True`, reads Stockholm / A3M files from disk instead of running alignment tools. Default: `False`.
+</ParamField>
+
+<ParamField path="msa_tools_n_cpu" type="int">
+  Number of CPU threads to pass to JackHMMER and HHblits. Default: `8`.
+</ParamField>
+
+#### `process`
+
+```python
+DataPipeline.process(
+    input_fasta_path: str,
+    msa_output_dir: str,
+) -> FeatureDict
+```
+
+Runs the full monomer pipeline for a single-sequence FASTA file.
+
+<ParamField path="input_fasta_path" type="str" required>
+  Path to a FASTA file containing exactly one sequence.
+</ParamField>
+
+<ParamField path="msa_output_dir" type="str" required>
+  Directory where alignment tool outputs (`.sto`, `.a3m`) will be written or read from when `use_precomputed_msas=True`.
+</ParamField>
+
+<ResponseField name="feature_dict" type="FeatureDict">
+  Merged dictionary of sequence features, MSA features, and template features ready for `RunModel.process_features`.
+</ResponseField>
+
+---
+
+### `make_sequence_features`
+
+```python
+pipeline.make_sequence_features(
+    sequence: str,
+    description: str,
+    num_res: int,
+) -> FeatureDict
+```
+
+Constructs the base sequence feature dictionary from a raw amino acid string.
+
+<ParamField path="sequence" type="str" required>
+  Amino acid sequence using standard one-letter codes.
+</ParamField>
+
+<ParamField path="description" type="str" required>
+  FASTA header description string (without the leading `>`).
+</ParamField>
+
+<ParamField path="num_res" type="int" required>
+  Sequence length. Must equal `len(sequence)`.
+</ParamField>
+
+<ResponseField name="features" type="FeatureDict">
+  Dictionary containing `aatype` (one-hot, shape `[num_res, 21]`), `between_segment_residues`, `domain_name`, `residue_index`, `seq_length`, and `sequence`.
+</ResponseField>
+
+---
+
+### `make_msa_features`
+
+```python
+pipeline.make_msa_features(
+    msas: Sequence[parsers.Msa],
+) -> FeatureDict
+```
+
+Combines multiple parsed MSAs into a single feature dictionary, deduplicating sequences.
+
+<ParamField path="msas" type="Sequence[parsers.Msa]" required>
+  One or more `parsers.Msa` objects (e.g. from `parsers.parse_stockholm` or `parsers.parse_a3m`). At least one MSA must be provided and each must be non-empty.
+</ParamField>
+
+<ResponseField name="features" type="FeatureDict">
+  Dictionary containing `msa` (`[num_alignments, num_res]` integer array), `deletion_matrix_int`, `num_alignments`, and `msa_species_identifiers`.
+</ResponseField>
+
+---
+
+## alphafold.data.pipeline_multimer
+
+```python
+from alphafold.data import pipeline_multimer
+```
+
+### `DataPipeline`
+
+Runs the alignment pipeline for the **multimer** AlphaFold model. Internally wraps a monomer `DataPipeline` and additionally searches the UniProt database for MSA pairing.
+
+#### Constructor
+
+```python
+pipeline_multimer.DataPipeline(
+    monomer_data_pipeline: pipeline.DataPipeline,
+    *,
+    jackhmmer_binary_path: str,
+    uniprot_database_path: str,
+    max_uniprot_hits: int = 50000,
+    use_precomputed_msas: bool = False,
+    jackhmmer_n_cpu: int = 8,
+)
+```
+
+<ParamField path="monomer_data_pipeline" type="pipeline.DataPipeline" required>
+  A fully configured monomer `DataPipeline` instance. Each chain in the multimer FASTA is processed through this pipeline individually.
+</ParamField>
+
+<ParamField path="jackhmmer_binary_path" type="str" required>
+  Path to the `jackhmmer` binary used to search the UniProt database.
+</ParamField>
+
+<ParamField path="uniprot_database_path" type="str" required>
+  Path to the unclustered UniProt FASTA database used for MSA pairing between chains.
+</ParamField>
+
+<ParamField path="max_uniprot_hits" type="int">
+  Maximum hits to retrieve from UniProt per chain. Default: `50000`.
+</ParamField>
+
+<ParamField path="use_precomputed_msas" type="bool">
+  When `True`, reads existing MSA files from disk. Default: `False`.
+</ParamField>
+
+<ParamField path="jackhmmer_n_cpu" type="int">
+  CPU threads for the UniProt JackHMMER search. Default: `8`.
+</ParamField>
+
+#### `process`
+
+```python
+pipeline_multimer.DataPipeline.process(
+    input_fasta_path: str,
+    msa_output_dir: str,
+) -> pipeline.FeatureDict
+```
+
+Runs per-chain monomer pipelines, computes UniProt MSAs for pairing, assembles and merges all chain features into a single multimer feature dict.
+
+<ParamField path="input_fasta_path" type="str" required>
+  Path to a FASTA file containing one or more sequences (one per chain).
+</ParamField>
+
+<ParamField path="msa_output_dir" type="str" required>
+  Directory where per-chain MSA subdirectories and a `chain_id_map.json` will be written.
+</ParamField>
+
+<ResponseField name="feature_dict" type="pipeline.FeatureDict">
+  Merged and padded multimer feature dict ready for the multimer `RunModel`.
+</ResponseField>
+
+**Example — end-to-end multimer pipeline**
+
+```python
+from alphafold.data import pipeline, pipeline_multimer, templates
+from alphafold.data.tools import hmmsearch, jackhmmer
+
+template_searcher = hmmsearch.Hmmsearch(
+    binary_path='/usr/bin/hmmsearch',
+    hmmbuild_binary_path='/usr/bin/hmmbuild',
+    database_path='/data/pdb_seqres/pdb_seqres.txt',
+)
+template_featurizer = templates.HmmsearchHitFeaturizer(
+    mmcif_dir='/data/pdb_mmcif/mmcif_files',
+    max_template_date='2022-01-01',
+    max_hits=20,
+    kalign_binary_path='/usr/bin/kalign',
+    release_dates_path=None,
+    obsolete_pdbs_path='/data/pdb_mmcif/obsolete.dat',
+)
+
+mono_pipeline = pipeline.DataPipeline(
+    jackhmmer_binary_path='/usr/bin/jackhmmer',
+    hhblits_binary_path='/usr/bin/hhblits',
+    uniref90_database_path='/data/uniref90/uniref90.fasta',
+    mgnify_database_path='/data/mgnify/mgy_clusters_2022_05.fa',
+    bfd_database_path='/data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt',
+    uniref30_database_path='/data/uniref30/UniRef30_2021_03',
+    small_bfd_database_path=None,
+    template_searcher=template_searcher,
+    template_featurizer=template_featurizer,
+    use_small_bfd=False,
+)
+
+multi_pipeline = pipeline_multimer.DataPipeline(
+    monomer_data_pipeline=mono_pipeline,
+    jackhmmer_binary_path='/usr/bin/jackhmmer',
+    uniprot_database_path='/data/uniprot/uniprot.fasta',
+)
+
+features = multi_pipeline.process(
+    input_fasta_path='complex.fasta',
+    msa_output_dir='/tmp/msas',
+)
+```
+
+---
+
+## alphafold.relax.relax
+
+```python
+from alphafold.relax import relax
+```
+
+### `AmberRelaxation`
+
+Applies Amber force-field minimisation to an unrelaxed predicted structure to remove stereochemical violations.
+
+#### Constructor
+
+```python
+AmberRelaxation(
+    *,
+    max_iterations: int,
+    tolerance: float,
+    stiffness: float,
+    exclude_residues: Sequence[int],
+    max_outer_iterations: int,
+    use_gpu: bool,
+)
+```
+
+<ParamField path="max_iterations" type="int" required>
+  Maximum number of L-BFGS gradient descent steps per inner iteration. Set to `0` for no limit (recommended: `0`).
+</ParamField>
+
+<ParamField path="tolerance" type="float" required>
+  Energy convergence tolerance in kcal/mol. AlphaFold's default is `2.39`.
+</ParamField>
+
+<ParamField path="stiffness" type="float" required>
+  Spring constant in kcal/mol·Å² for the heavy-atom restraining potential. AlphaFold's default is `10.0`.
+</ParamField>
+
+<ParamField path="exclude_residues" type="Sequence[int]" required>
+  Zero-indexed list of residue positions to exclude from per-atom restraints. Pass an empty list `[]` to restrain all residues.
+</ParamField>
+
+<ParamField path="max_outer_iterations" type="int" required>
+  Maximum violation-informed outer loop iterations. Each outer iteration identifies residues with remaining violations and re-relaxes with looser restraints. AlphaFold uses `3`; `20` relaxes >95% of problematic cases.
+</ParamField>
+
+<ParamField path="use_gpu" type="bool" required>
+  Whether to run OpenMM energy minimisation on GPU. GPU relaxation is significantly faster but can occasionally be less stable.
+</ParamField>
+
+#### `process`
+
+```python
+AmberRelaxation.process(
+    *,
+    prot: protein.Protein,
+) -> Tuple[str, Dict[str, Any], Sequence[float]]
+```
+
+Runs Amber relaxation on a `Protein` instance.
+
+<ParamField path="prot" type="protein.Protein" required>
+  Unrelaxed protein structure, e.g. as returned by `protein.from_prediction`.
+</ParamField>
+
+<ResponseField name="min_pdb" type="str">
+  PDB-format string of the relaxed structure with original B-factors restored.
+</ResponseField>
+
+<ResponseField name="debug_data" type="Dict[str, Any]">
+  Dictionary with keys `initial_energy`, `final_energy` (kcal/mol), `attempts` (number of outer iterations performed), and `rmsd` (Å RMSD between start and end positions).
+</ResponseField>
+
+<ResponseField name="violations" type="Sequence[float]">
+  Per-residue binary violation mask (`0.0` or `1.0`) indicating residues with remaining structural violations after relaxation.
+</ResponseField>
+
+**Example**
+
+```python
+from alphafold.relax import relax
+
+amber_relaxer = relax.AmberRelaxation(
+    max_iterations=0,
+    tolerance=2.39,
+    stiffness=10.0,
+    exclude_residues=[],
+    max_outer_iterations=3,
+    use_gpu=True,
+)
+
+relaxed_pdb, debug, violations = amber_relaxer.process(prot=unrelaxed_protein)
+print(f"Energy: {debug['initial_energy']:.1f} → {debug['final_energy']:.1f} kcal/mol")
+print(f"RMSD from start: {debug['rmsd']:.3f} Å")
+print(f"Remaining violations: {sum(violations)}")
+```
+
+---
+
+## alphafold.common.confidence
+
+```python
+from alphafold.common import confidence
+```
+
+### `compute_plddt`
+
+```python
+confidence.compute_plddt(logits: np.ndarray) -> np.ndarray
+```
+
+Converts raw pLDDT logits to per-residue confidence scores on a 0–100 scale.
+
+<ParamField path="logits" type="np.ndarray" required>
+  Array of shape `[num_res, num_bins]` output from the `PredictedLDDTHead`. The default model uses `num_bins=50`.
+</ParamField>
+
+<ResponseField name="plddt" type="np.ndarray">
+  Array of shape `[num_res]` with per-residue pLDDT values in the range `[0, 100]`. Higher values indicate greater confidence.
+</ResponseField>
+
+---
+
+### `compute_predicted_aligned_error`
+
+```python
+confidence.compute_predicted_aligned_error(
+    logits: np.ndarray,
+    breaks: np.ndarray,
+) -> Dict[str, np.ndarray]
+```
+
+Converts PAE logits to expected aligned distance errors for all residue pairs.
+
+<ParamField path="logits" type="np.ndarray" required>
+  Array of shape `[num_res, num_res, num_bins]` from `PredictedAlignedErrorHead`.
+</ParamField>
+
+<ParamField path="breaks" type="np.ndarray" required>
+  Array of shape `[num_bins - 1]` defining the error bin edges in Ångströms.
+</ParamField>
+
+<ResponseField name="result" type="Dict[str, np.ndarray]">
+  Dictionary with:
+  - `aligned_confidence_probs` — `[num_res, num_res, num_bins]` softmax probabilities.
+  - `predicted_aligned_error` — `[num_res, num_res]` expected distance error in Å.
+  - `max_predicted_aligned_error` — scalar maximum possible PAE value.
+</ResponseField>
+
+---
+
+### `predicted_tm_score`
+
+```python
+confidence.predicted_tm_score(
+    logits: np.ndarray,
+    breaks: np.ndarray,
+    residue_weights: Optional[np.ndarray] = None,
+    asym_id: Optional[np.ndarray] = None,
+    interface: bool = False,
+) -> np.ndarray
+```
+
+Computes predicted TM-score (pTM) or interface pTM (ipTM) from PAE logits.
+
+<ParamField path="logits" type="np.ndarray" required>
+  Array of shape `[num_res, num_res, num_bins]` from `PredictedAlignedErrorHead`.
+</ParamField>
+
+<ParamField path="breaks" type="np.ndarray" required>
+  Array of shape `[num_bins - 1]` defining the error bin edges.
+</ParamField>
+
+<ParamField path="residue_weights" type="Optional[np.ndarray]">
+  Array of shape `[num_res]` with per-residue weights in `[0, 1]`. Defaults to all-ones.
+</ParamField>
+
+<ParamField path="asym_id" type="Optional[np.ndarray]">
+  Array of shape `[num_res]` with integer chain IDs. Required when `interface=True`.
+</ParamField>
+
+<ParamField path="interface" type="bool">
+  When `True`, computes interface pTM (ipTM) which only considers cross-chain residue pairs. Default: `False`.
+</ParamField>
+
+<ResponseField name="ptm_score" type="np.ndarray">
+  Scalar predicted TM-score or interface pTM score.
+</ResponseField>
+
+---
+
+## alphafold.common.protein
+
+```python
+from alphafold.common import protein
+```
+
+### `Protein`
+
+```python
+@dataclasses.dataclass(frozen=True)
+class Protein:
+    atom_positions: np.ndarray   # [num_res, num_atom_type, 3]  Cartesian coords in Å
+    aatype: np.ndarray           # [num_res]  integer amino-acid type (0–20, 20=unknown)
+    atom_mask: np.ndarray        # [num_res, num_atom_type]  1.0 if atom present
+    residue_index: np.ndarray    # [num_res]  PDB residue numbers (not necessarily 0-indexed)
+    chain_index: np.ndarray      # [num_res]  0-indexed chain integer ID
+    b_factors: np.ndarray        # [num_res, num_atom_type]  B-factors in Å²
+```
+
+Frozen dataclass representing a protein structure. Atom ordering follows `residue_constants.atom_types` (37 atom types: N, CA, C, …). The maximum number of chains is 62 (the PDB chain ID alphabet).
+
+---
+
+### `from_prediction`
+
+```python
+protein.from_prediction(
+    features: FeatureDict,
+    result: ModelOutput,
+    b_factors: Optional[np.ndarray] = None,
+    remove_leading_feature_dimension: bool = True,
+) -> Protein
+```
+
+Assembles a `Protein` from the outputs of a `RunModel.predict` call.
+
+<ParamField path="features" type="FeatureDict" required>
+  Processed feature dict (output of `RunModel.process_features`).
+</ParamField>
+
+<ParamField path="result" type="ModelOutput" required>
+  Model prediction dict (output of `RunModel.predict`).
+</ParamField>
+
+<ParamField path="b_factors" type="Optional[np.ndarray]">
+  B-factor array of shape `[num_res, num_atom_type]`. If `None`, all B-factors are set to zero. In `run_alphafold.py`, pLDDT values are broadcast across atom types and used as B-factors.
+</ParamField>
+
+<ParamField path="remove_leading_feature_dimension" type="bool">
+  When `True` (monomer), strips the leading ensemble/batch dimension from feature arrays. Set to `False` for multimer features. Default: `True`.
+</ParamField>
+
+<ResponseField name="protein" type="Protein">
+  A frozen `Protein` instance with residue indices starting from 1.
+</ResponseField>
+
+**Example**
+
+```python
+import numpy as np
+from alphafold.common import protein, residue_constants
+
+# Broadcast pLDDT to all atom positions for use as B-factors
+plddt = result['plddt']  # [num_res]
+plddt_b_factors = np.repeat(plddt[:, None], residue_constants.atom_type_num, axis=-1)
+
+unrelaxed_protein = protein.from_prediction(
+    features=processed_features,
+    result=result,
+    b_factors=plddt_b_factors,
+    remove_leading_feature_dimension=True,  # False for multimer
+)
+```
+
+---
+
+### `to_pdb`
+
+```python
+protein.to_pdb(prot: Protein) -> str
+```
+
+Converts a `Protein` instance to a PDB-format string. Lines are padded to 80 characters.
+
+<ParamField path="prot" type="Protein" required>
+  The protein structure to serialise.
+</ParamField>
+
+<ResponseField name="pdb_string" type="str">
+  Multi-line PDB string terminated with `END\n`. Contains `MODEL 1` / `ENDMDL` markers and `TER` records between chains.
+</ResponseField>
+
+---
+
+### `from_pdb_string`
+
+```python
+protein.from_pdb_string(
+    pdb_str: str,
+    chain_id: Optional[str] = None,
+) -> Protein
+```
+
+Parses a PDB string into a `Protein`. Non-standard residue types are converted to unknown (`X`) and non-standard atoms are ignored.
+
+<ParamField path="pdb_str" type="str" required>
+  Contents of a PDB file as a string.
+</ParamField>
+
+<ParamField path="chain_id" type="Optional[str]">
+  If specified (e.g. `'A'`), only atoms belonging to this chain are parsed. Otherwise all chains are included.
+</ParamField>
+
+<ResponseField name="protein" type="Protein">
+  Parsed `Protein` instance.
+</ResponseField>
+
+---
+
+### `to_mmcif`
+
+```python
+protein.to_mmcif(
+    prot: Protein,
+    file_id: str,
+    model_type: str,
+) -> str
+```
+
+Converts a `Protein` to an mmCIF-format string.
+
+<ParamField path="prot" type="Protein" required>
+  The protein to serialise.
+</ParamField>
+
+<ParamField path="file_id" type="str" required>
+  The file ID (typically the PDB ID) embedded in the mmCIF `_entry.id` field.
+</ParamField>
+
+<ParamField path="model_type" type="str" required>
+  Either `'Monomer'` or `'Multimer'`. Embedded in mmCIF metadata.
+</ParamField>
+
+---
+
+## alphafold.model.config
+
+```python
+from alphafold.model import config
+```
+
+### `MODEL_PRESETS`
+
+```python
+MODEL_PRESETS: Dict[str, Tuple[str, ...]] = {
+    'monomer':        ('model_1', 'model_2', 'model_3', 'model_4', 'model_5'),
+    'monomer_casp14': ('model_1', 'model_2', 'model_3', 'model_4', 'model_5'),
+    'monomer_ptm':    ('model_1_ptm', 'model_2_ptm', 'model_3_ptm', 'model_4_ptm', 'model_5_ptm'),
+    'multimer':       ('model_1_multimer_v3', 'model_2_multimer_v3', 'model_3_multimer_v3',
+                       'model_4_multimer_v3', 'model_5_multimer_v3'),
+}
+```
+
+Maps the `--model_preset` flag value to the list of individual model names to run.
+
+<Note>
+  `monomer_casp14` uses the same model weights as `monomer` but sets `num_ensemble=8` (8× more compute) to match the original CASP14 submission.
+</Note>
+
+---
+
+### `model_config`
+
+```python
+config.model_config(name: str) -> ml_collections.ConfigDict
+```
+
+Returns a deep copy of the base configuration dict (`CONFIG` for monomer, `CONFIG_MULTIMER` for multimer) with model-specific overrides applied.
+
+<ParamField path="name" type="str" required>
+  One of the model names present in `CONFIG_DIFFS`, e.g. `'model_1'`, `'model_3_ptm'`, `'model_2_multimer_v3'`.
+</ParamField>
+
+<ResponseField name="cfg" type="ml_collections.ConfigDict">
+  Mutable config dict with keys `data` (monomer only) and `model`. Raises `ValueError` for unknown model names.
+</ResponseField>
+
+**Example**
+
+```python
+from alphafold.model import config, data, model
+
+model_name = 'model_1_multimer_v3'
+cfg = config.model_config(model_name)
+
+# Adjust ensemble size
+cfg.model.num_ensemble_eval = 1
+
+params = data.get_model_haiku_params(model_name=model_name, data_dir='/data/alphafold')
+runner = model.RunModel(cfg, params)
+```
+
+---
+
+### `get_model_haiku_params`
+
+```python
+from alphafold.model import data
+
+data.get_model_haiku_params(
+    model_name: str,
+    data_dir: str,
+) -> Mapping[str, Mapping[str, jax.Array]]
+```
+
+Loads pre-trained Haiku parameters for a named model from a NumPy `.npz` file on disk.
+
+<ParamField path="model_name" type="str" required>
+  Model name, e.g. `'model_1'` or `'model_1_multimer_v3'`.
+</ParamField>
+
+<ParamField path="data_dir" type="str" required>
+  Root directory containing the `params/` subdirectory (i.e. the AlphaFold data download directory).
+</ParamField>
+
+<ResponseField name="params" type="Mapping[str, Mapping[str, jax.Array]]">
+  Nested dict of Haiku parameter arrays, suitable for passing to `RunModel`.
+</ResponseField>

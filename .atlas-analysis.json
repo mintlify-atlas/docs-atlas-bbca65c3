@@ -1,0 +1,83 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "AlphaFold",
+  "projectDescription": "An open-source implementation of AlphaFold v2, DeepMind's deep learning system for highly accurate protein structure prediction from amino acid sequences.",
+  "theme": "palm",
+  "primaryColor": "#f6be31",
+  "lightColor": "#7c531c",
+  "darkColor": "#040404",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Running AlphaFold",
+            "pages": [
+              "running/monomer",
+              "running/multimer",
+              "running/configuration",
+              "running/output"
+            ]
+          },
+          {
+            "group": "Data & Databases",
+            "pages": [
+              "data/genetic-databases",
+              "data/model-parameters",
+              "data/updating"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/confidence-metrics",
+              "concepts/msa-pipeline"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/python-api",
+              "reference/cli-flags",
+              "reference/faq"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Highly accurate protein structure prediction from amino acid sequences",
+    "AlphaFold-Multimer for protein complex prediction",
+    "Multiple model presets (monomer, monomer_ptm, monomer_casp14, multimer)",
+    "Per-residue confidence scoring (pLDDT) and predicted aligned error (PAE)",
+    "Docker-based deployment with GPU acceleration",
+    "Amber relaxation post-processing for improved local geometry",
+    "Multiple sequence alignment (MSA) pipeline using HHblits, JackHMMER, and HHsearch",
+    "Support for bulk inference via precomputed MSAs"
+  ],
+  "publicApiSurface": [
+    "run_alphafold.main() — top-level entry point for structure prediction",
+    "RunModel (alphafold.model.model) — container for the JAX model with predict()",
+    "DataPipeline (alphafold.data.pipeline) — builds input features for monomer prediction",
+    "DataPipelineMultimer (alphafold.data.pipeline_multimer) — builds input features for multimer prediction",
+    "AmberRelaxation (alphafold.relax.relax) — post-processing with Amber force field",
+    "compute_plddt() (alphafold.common.confidence) — computes per-residue pLDDT scores",
+    "compute_predicted_aligned_error() (alphafold.common.confidence) — computes PAE matrix",
+    "predicted_tm_score() (alphafold.common.confidence) — computes pTM and ipTM scores",
+    "MODEL_PRESETS (alphafold.model.config) — available model presets: monomer, monomer_ptm, monomer_casp14, multimer",
+    "make_sequence_features() (alphafold.data.pipeline) — constructs sequence feature dict",
+    "from_prediction() (alphafold.common.protein) — creates Protein from model output",
+    "to_pdb() (alphafold.common.protein) — converts Protein to PDB format string"
+  ]
+}

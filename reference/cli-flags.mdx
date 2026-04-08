@@ -1,0 +1,330 @@
+---
+title: "CLI Flags Reference"
+description: "Complete reference for all command-line flags accepted by run_alphafold.py and docker/run_docker.py."
+---
+
+AlphaFold exposes two entry points:
+
+- **`run_alphafold.py`** — the core prediction script, run directly or inside the Docker container.
+- **`docker/run_docker.py`** — a Python launcher that builds and runs the Docker container, forwarding most flags to `run_alphafold.py`.
+
+<Note>
+  Flags marked **required** must be provided on every invocation. Flags that are required only under certain conditions are noted in their descriptions.
+</Note>
+
+---
+
+## Input / Output
+
+<ParamField path="--fasta_paths" type="list[str]" required>
+  Comma-separated paths to FASTA files. Each file is folded in sequence. A FASTA file containing multiple sequences is treated as a multimer target.
+
+  All basenames must be unique — the basename is used as the name of each output subdirectory.
+
+  ```bash
+  --fasta_paths=protein1.fasta,protein2.fasta
+  ```
+</ParamField>
+
+<ParamField path="--output_dir" type="str" required>
+  Absolute path to the directory where prediction outputs will be written. A subdirectory named after each FASTA file basename is created inside this directory.
+</ParamField>
+
+<ParamField path="--data_dir" type="str" required>
+  Path to the root directory containing model parameters and genetic databases. This is the `<DOWNLOAD_DIR>` used with `scripts/download_all_data.sh`.
+</ParamField>
+
+---
+
+## Model flags
+
+<ParamField path="--model_preset" type="enum" default="monomer">
+  Selects the model architecture and parameter set. Accepted values:
+
+  | Value | Description |
+  |---|---|
+  | `monomer` | Original CASP14 model, no ensembling. Recommended default for single chains. |
+  | `monomer_casp14` | Same weights as `monomer`, but `num_ensemble=8` to match the CASP14 submission. ~8× slower with marginal accuracy gain (+0.1 avg GDT). |
+  | `monomer_ptm` | CASP14 model fine-tuned with a pTM head, providing pairwise PAE confidence. Slightly less accurate than `monomer`. |
+  | `multimer` | AlphaFold-Multimer (v3 weights). Required for multi-chain FASTA inputs. Produces pTM and PAE outputs. |
+
+  ```bash
+  --model_preset=multimer
+  ```
+</ParamField>
+
+<ParamField path="--num_multimer_predictions_per_model" type="int" default="5">
+  Number of predictions per model when using `--model_preset=multimer`. With 5 models this produces 25 total predictions by default. Has no effect on monomer presets.
+
+  ```bash
+  --num_multimer_predictions_per_model=1
+  ```
+</ParamField>
+
+<ParamField path="--models_to_relax" type="enum" default="best">
+  Which predicted structures to run Amber relaxation on after prediction:
+
+  | Value | Behaviour |
+  |---|---|
+  | `best` | Relax only the top-ranked model (by pLDDT or ipTM+pTM). Default. |
+  | `all` | Relax all 5 models. More time-consuming. |
+  | `none` | Skip relaxation entirely. Faster but may produce stereochemical violations. |
+</ParamField>
+
+<ParamField path="--use_gpu_relax" type="bool" required>
+  Whether to run Amber relaxation on the GPU. GPU relaxation is substantially faster. A GPU must be available when this flag is `True`.
+
+  ```bash
+  --use_gpu_relax=true
+  ```
+</ParamField>
+
+---
+
+## Database flags
+
+<Warning>
+  The required database flags depend on `--model_preset` and `--db_preset`. Providing the wrong combination raises a `ValueError` at startup. The table below summarises which flags are required in each case.
+
+  | Flag | `full_dbs` monomer | `reduced_dbs` monomer | `full_dbs` multimer |
+  |---|---|---|---|
+  | `--bfd_database_path` | Required | — | Required |
+  | `--uniref30_database_path` | Required | — | Required |
+  | `--small_bfd_database_path` | — | Required | — |
+  | `--pdb70_database_path` | Required | Required | — |
+  | `--pdb_seqres_database_path` | — | — | Required |
+  | `--uniprot_database_path` | — | — | Required |
+</Warning>
+
+<ParamField path="--db_preset" type="enum" default="full_dbs">
+  Chooses the MSA database configuration:
+
+  | Value | Databases used | Disk space | RAM |
+  |---|---|---|---|
+  | `full_dbs` | BFD + UniRef30 + Uniref90 + MGnify | ~2.62 TB | ~64 GB |
+  | `reduced_dbs` | small BFD + Uniref90 + MGnify | ~600 GB | 8 GB |
+</ParamField>
+
+<ParamField path="--uniref90_database_path" type="str" required>
+  Path to the Uniref90 FASTA file. Searched with JackHMMER for all presets.
+
+  Default location (set by `run_docker.py`): `<data_dir>/uniref90/uniref90.fasta`
+</ParamField>
+
+<ParamField path="--mgnify_database_path" type="str" required>
+  Path to the MGnify FASTA file. Searched with JackHMMER for all presets.
+
+  Default location: `<data_dir>/mgnify/mgy_clusters_2022_05.fa`
+</ParamField>
+
+<ParamField path="--bfd_database_path" type="str">
+  Path to the BFD database prefix (used by HHblits with `full_dbs` preset).
+
+  Default location: `<data_dir>/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt`
+</ParamField>
+
+<ParamField path="--small_bfd_database_path" type="str">
+  Path to the small BFD FASTA file (used by JackHMMER with `reduced_dbs` preset).
+
+  Default location: `<data_dir>/small_bfd/bfd-first_non_consensus_sequences.fasta`
+</ParamField>
+
+<ParamField path="--uniref30_database_path" type="str">
+  Path to the UniRef30 database prefix (used by HHblits with `full_dbs` preset).
+
+  Default location: `<data_dir>/uniref30/UniRef30_2021_03`
+</ParamField>
+
+<ParamField path="--uniprot_database_path" type="str">
+  Path to the unclustered UniProt FASTA file used for cross-chain MSA pairing. Required when `--model_preset=multimer`.
+
+  Default location: `<data_dir>/uniprot/uniprot.fasta`
+</ParamField>
+
+<ParamField path="--pdb70_database_path" type="str">
+  Path to the PDB70 database prefix (searched by HHsearch for structural templates). Required when **not** using `--model_preset=multimer`.
+
+  Default location: `<data_dir>/pdb70/pdb70`
+</ParamField>
+
+<ParamField path="--pdb_seqres_database_path" type="str">
+  Full path to the PDB seqres text file (searched by hmmsearch for multimer templates). Required when `--model_preset=multimer`.
+
+  Default location: `<data_dir>/pdb_seqres/pdb_seqres.txt`
+</ParamField>
+
+<ParamField path="--template_mmcif_dir" type="str" required>
+  Path to the directory containing template mmCIF structures, each named `<pdb_id>.cif`.
+
+  Default location: `<data_dir>/pdb_mmcif/mmcif_files`
+</ParamField>
+
+<ParamField path="--max_template_date" type="str" required>
+  ISO-8601 date string (`YYYY-MM-DD`). Only PDB structures released on or before this date are used as templates. Useful for reproducing historical predictions.
+
+  ```bash
+  --max_template_date=2022-01-01
+  ```
+</ParamField>
+
+<ParamField path="--obsolete_pdbs_path" type="str" required>
+  Path to a file mapping obsolete PDB IDs to their replacements.
+
+  Default location: `<data_dir>/pdb_mmcif/obsolete.dat`
+</ParamField>
+
+---
+
+## Binary paths
+
+AlphaFold uses several bioinformatics tools for MSA construction and template search. The flags below specify the executable paths. All default to the result of `shutil.which('<tool>')`, so tools available on `$PATH` are found automatically.
+
+<ParamField path="--jackhmmer_binary_path" type="str" default="which('jackhmmer')">
+  Path to the JackHMMER binary. Used to search Uniref90 and MGnify (and UniProt for multimer).
+</ParamField>
+
+<ParamField path="--hhblits_binary_path" type="str" default="which('hhblits')">
+  Path to the HHblits binary. Used to search BFD + UniRef30 when `--db_preset=full_dbs`.
+</ParamField>
+
+<ParamField path="--hhsearch_binary_path" type="str" default="which('hhsearch')">
+  Path to the HHsearch binary. Used for PDB70 template search in monomer mode.
+</ParamField>
+
+<ParamField path="--hmmsearch_binary_path" type="str" default="which('hmmsearch')">
+  Path to the hmmsearch binary. Used for PDB seqres template search in multimer mode.
+</ParamField>
+
+<ParamField path="--hmmbuild_binary_path" type="str" default="which('hmmbuild')">
+  Path to the hmmbuild binary. Used together with hmmsearch for multimer template search.
+</ParamField>
+
+<ParamField path="--kalign_binary_path" type="str" default="which('kalign')">
+  Path to the Kalign binary. Used by the template featurizer to align template structures.
+</ParamField>
+
+---
+
+## Performance flags
+
+<ParamField path="--use_precomputed_msas" type="bool" default="false">
+  When `True`, reads MSA files from the output directory instead of running alignment tools. The output directory and protein sequence must be identical to the original run.
+
+  <Warning>
+    AlphaFold does not validate that the sequence, database versions, or configuration match when reusing MSAs. Use with caution.
+  </Warning>
+
+  ```bash
+  --use_precomputed_msas=true
+  ```
+</ParamField>
+
+<ParamField path="--benchmark" type="bool" default="false">
+  When `True`, runs each model twice and stores the second (compilation-free) timing in `timings.json`. Use this to get a more accurate picture of steady-state inference time.
+</ParamField>
+
+<ParamField path="--random_seed" type="int" default="None">
+  Seed for the data pipeline random number generator. When not set, a random seed is chosen automatically. Even with a fixed seed, GPU inference remains non-deterministic.
+</ParamField>
+
+<ParamField path="--jackhmmer_n_cpu" type="int" default="min(cpu_count, 8)">
+  Number of CPU threads for JackHMMER. Going above 8 threads provides little additional speedup.
+</ParamField>
+
+<ParamField path="--hmmsearch_n_cpu" type="int" default="min(cpu_count, 8)">
+  Number of CPU threads for hmmsearch.
+</ParamField>
+
+<ParamField path="--hhsearch_n_cpu" type="int" default="min(cpu_count, 8)">
+  Number of CPU threads for HHsearch.
+</ParamField>
+
+---
+
+## Docker-specific flags
+
+The following flags are only available in `docker/run_docker.py`. They control the Docker container itself rather than the AlphaFold algorithm.
+
+<ParamField path="--gpu_devices" type="str" default="all">
+  Comma-separated list of GPU UUIDs or indices passed to `NVIDIA_VISIBLE_DEVICES`. Use `all` to expose every GPU, or specify individual devices to restrict which GPUs the container sees.
+
+  ```bash
+  --gpu_devices=0,1
+  ```
+</ParamField>
+
+<ParamField path="--docker_image_name" type="str" default="alphafold">
+  Name of the Docker image to run. Change this if you have tagged the image under a different name.
+
+  ```bash
+  --docker_image_name=my-alphafold:v2.3
+  ```
+</ParamField>
+
+<ParamField path="--docker_user" type="str" default="<current UID>:<current GID>">
+  `UID:GID` pair used to run the Docker container. Output directories will be owned by this user. Defaults to the UID and GID of the user invoking `run_docker.py`.
+
+  ```bash
+  --docker_user=1001:1001
+  ```
+</ParamField>
+
+<ParamField path="--use_gpu" type="bool" default="true">
+  When `True`, the NVIDIA container runtime is enabled and GPU device requests are passed to the Docker container. Set to `False` to run on CPU only (not recommended — inference will be very slow).
+</ParamField>
+
+<ParamField path="--enable_gpu_relax" type="bool" default="true">
+  When `True` and `--use_gpu=true`, Amber relaxation is run on GPU inside the container. The effective `--use_gpu_relax` value passed to `run_alphafold.py` is `enable_gpu_relax AND use_gpu`.
+</ParamField>
+
+---
+
+## Complete example
+
+<Tabs>
+  <Tab title="Monomer (Docker)">
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=protein.fasta \
+      --output_dir=/home/user/results \
+      --data_dir=/data/alphafold \
+      --max_template_date=2022-01-01 \
+      --model_preset=monomer \
+      --db_preset=full_dbs \
+      --models_to_relax=best \
+      --enable_gpu_relax=true
+    ```
+  </Tab>
+  <Tab title="Multimer (Docker)">
+    ```bash
+    python3 docker/run_docker.py \
+      --fasta_paths=complex.fasta \
+      --output_dir=/home/user/results \
+      --data_dir=/data/alphafold \
+      --max_template_date=2022-01-01 \
+      --model_preset=multimer \
+      --db_preset=full_dbs \
+      --num_multimer_predictions_per_model=1 \
+      --models_to_relax=best \
+      --enable_gpu_relax=true
+    ```
+  </Tab>
+  <Tab title="Direct (reduced_dbs)">
+    ```bash
+    python3 run_alphafold.py \
+      --fasta_paths=protein.fasta \
+      --output_dir=/home/user/results \
+      --data_dir=/data/alphafold \
+      --uniref90_database_path=/data/alphafold/uniref90/uniref90.fasta \
+      --mgnify_database_path=/data/alphafold/mgnify/mgy_clusters_2022_05.fa \
+      --small_bfd_database_path=/data/alphafold/small_bfd/bfd-first_non_consensus_sequences.fasta \
+      --pdb70_database_path=/data/alphafold/pdb70/pdb70 \
+      --template_mmcif_dir=/data/alphafold/pdb_mmcif/mmcif_files \
+      --obsolete_pdbs_path=/data/alphafold/pdb_mmcif/obsolete.dat \
+      --max_template_date=2022-01-01 \
+      --model_preset=monomer \
+      --db_preset=reduced_dbs \
+      --use_gpu_relax=true
+    ```
+  </Tab>
+</Tabs>

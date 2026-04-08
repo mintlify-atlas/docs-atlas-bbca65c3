@@ -1,0 +1,358 @@
+---
+title: "Confidence Metrics"
+description: "A detailed reference for AlphaFold's four confidence outputs: pLDDT, pTM, ipTM, and PAE — including how they are computed, what they mean, and how to access them."
+---
+
+AlphaFold produces four confidence metrics that quantify how reliable each part of a predicted structure is. All metrics are computed by functions in `alphafold/common/confidence.py` and are available in the `result_model_*.pkl` output files.
+
+<Warning>
+  Confidence scores reflect the model's internal self-assessment, not experimental validation. High confidence does not guarantee the prediction is correct — especially for regions with few homologous sequences in the MSA. Always cross-reference with experimental data when available.
+</Warning>
+
+---
+
+## pLDDT — Predicted Local Distance Difference Test
+
+<Accordion title="Definition and computation">
+  pLDDT is a per-residue confidence score in the range **0–100**, where higher values indicate greater confidence. It estimates the expected lDDT-Cα score (Local Distance Difference Test on Cα atoms) the model would achieve if the true structure were known.
+
+  The `PredictedLDDTHead` outputs logits of shape `[N_res, num_bins]` (50 bins), which are converted to a scalar per residue by `compute_plddt`:
+
+  ```python
+  # alphafold/common/confidence.py
+
+  def compute_plddt(logits: np.ndarray) -> np.ndarray:
+      """Computes per-residue pLDDT from logits.
+
+      Args:
+        logits: [num_res, num_bins] output from the PredictedLDDTHead.
+
+      Returns:
+        plddt: [num_res] per-residue pLDDT.
+      """
+      num_bins = logits.shape[-1]
+      bin_width = 1.0 / num_bins
+      bin_centers = np.arange(start=0.5 * bin_width, stop=1.0, step=bin_width)
+      probs = np.array(_softmax(logits, axis=-1))
+      predicted_lddt_ca = np.sum(probs * bin_centers[None, :], axis=-1)
+      return predicted_lddt_ca * 100
+  ```
+
+  The bin centers span (0, 1] uniformly (50 bins → 0.01-wide bins). The expected bin value is multiplied by 100 to yield a score in [0, 100].
+</Accordion>
+
+<Accordion title="Confidence categories">
+  Each residue's pLDDT is mapped to one of four categories by `_confidence_category`:
+
+  ```python
+  # alphafold/common/confidence.py
+
+  def _confidence_category(score: float) -> str:
+      """Categorizes pLDDT into: disordered (D), low (L), medium (M), high (H)."""
+      if 0 <= score < 50:
+          return 'D'   # Disordered / very low confidence
+      if 50 <= score < 70:
+          return 'L'   # Low confidence
+      elif 70 <= score < 90:
+          return 'M'   # Medium confidence
+      elif 90 <= score <= 100:
+          return 'H'   # High confidence
+  ```
+
+  | Score range | Category | Interpretation |
+  |---|---|---|
+  | 90–100 | High (H) | Reliable backbone; suitable for most structural analyses |
+  | 70–90 | Medium (M) | Generally correct backbone but some uncertainty |
+  | 50–70 | Low (L) | Large-scale topology may be correct but details are unreliable |
+  | 0–50 | Disordered (D) | Likely intrinsically disordered; coordinates should not be interpreted |
+
+  The categories are exported by `confidence_json`, which returns a JSON string used by the AlphaFold Database.
+</Accordion>
+
+<Accordion title="Storage and use">
+  **In PDB files:** pLDDT values are stored in the B-factor column of all output PDB files (`unrelaxed_model_*.pdb`, `relaxed_model_*.pdb`, `ranked_*.pdb`).
+
+  ```
+  ATOM      1  N   MET A   1      10.234  15.678  20.901  1.00 92.34           N
+  ```
+
+  The value `92.34` in column 61–66 is the pLDDT for that atom's residue.
+
+  <Warning>
+    Unlike crystallographic B-factors, **higher pLDDT is better**. Software that colors structures by B-factor will invert the color scale relative to standard usage.
+  </Warning>
+
+  **In pkl files:** The `plddt` key holds a NumPy array of shape `[N_res]`.
+
+  ```python
+  import pickle
+  import numpy as np
+
+  with open('result_model_1.pkl', 'rb') as f:
+      result = pickle.load(f)
+
+  plddt = result['plddt']          # np.ndarray, shape [N_res], values 0–100
+  mean_plddt = np.mean(plddt)      # Used for monomer model ranking
+  print(f"Mean pLDDT: {mean_plddt:.2f}")
+  ```
+
+  **Model ranking:** For monomer runs, `ranked_0.pdb` is the model with the highest mean pLDDT across all residues. The ranking values are stored in `ranking_debug.json`.
+</Accordion>
+
+---
+
+## pTM — Predicted TM-score
+
+<Accordion title="Definition and computation">
+  pTM is a **global** confidence score in the range **0–1** that estimates the TM-score the prediction would achieve against the true structure. Unlike pLDDT, it is sensitive to overall domain packing and long-range structural consistency.
+
+  It is computed from the same `PredictedAlignedErrorHead` logits as PAE, using the TM-score formula from Yang & Skolnick (2004):
+
+  ```python
+  # alphafold/common/confidence.py
+
+  def predicted_tm_score(
+      logits: np.ndarray,
+      breaks: np.ndarray,
+      residue_weights: Optional[np.ndarray] = None,
+      asym_id: Optional[np.ndarray] = None,
+      interface: bool = False,
+  ) -> np.ndarray:
+      """Computes predicted TM alignment or predicted interface TM alignment score.
+
+      Args:
+        logits: [num_res, num_res, num_bins] the logits output from
+          PredictedAlignedErrorHead.
+        breaks: [num_bins] the error bins.
+        residue_weights: [num_res] the per residue weights to use for the
+          expectation.
+        asym_id: [num_res] the asymmetric unit ID - the chain ID. Only needed for
+          ipTM calculation, i.e. when interface=True.
+        interface: If True, interface predicted TM score is computed.
+
+      Returns:
+        ptm_score: The predicted TM alignment or the predicted iTM score.
+      """
+      if residue_weights is None:
+          residue_weights = np.ones(logits.shape[0])
+
+      bin_centers = _calculate_bin_centers(breaks)
+      num_res = int(np.sum(residue_weights))
+      clipped_num_res = max(num_res, 19)
+
+      # d_0(num_res) from TM-score definition
+      d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
+
+      probs = np.array(_softmax(logits, axis=-1))
+      tm_per_bin = 1.0 / (1 + np.square(bin_centers) / np.square(d0))
+      predicted_tm_term = np.sum(probs * tm_per_bin, axis=-1)
+      # ... (normalization and argmax over best alignment)
+  ```
+
+  The normalization length `d0` is sequence-length dependent, making pTM directly comparable across proteins of different sizes.
+</Accordion>
+
+<Accordion title="Availability and access">
+  pTM is **only available** from pTM model variants (`monomer_ptm` preset or `multimer` preset). The `PredictedAlignedErrorHead` weight is `0.0` in base monomer models, so those models do not output PAE or pTM.
+
+  ```python
+  import pickle
+
+  # File is named result_model_1_ptm_pred_0.pkl for monomer_ptm preset
+  with open('result_model_1_ptm_pred_0.pkl', 'rb') as f:
+      result = pickle.load(f)
+
+  ptm = result['ptm']    # scalar float, range 0–1
+  print(f"pTM score: {ptm:.4f}")
+  ```
+
+  A pTM value above **0.5** generally indicates a confident overall fold prediction. Values above **0.7** suggest a highly confident global structure.
+</Accordion>
+
+---
+
+## ipTM — Interface Predicted TM-score
+
+<Accordion title="Definition and computation">
+  ipTM (interface pTM) is a variant of pTM that is **only computed for AlphaFold-Multimer**. It measures model confidence specifically in the predicted interface between protein chains.
+
+  ipTM is computed by passing `interface=True` to `predicted_tm_score`, which restricts the pair mask to cross-chain pairs:
+
+  ```python
+  # alphafold/common/confidence.py (within predicted_tm_score)
+
+  pair_mask = np.ones(shape=(num_res, num_res), dtype=bool)
+  if interface:
+      # Only consider pairs where the two residues are on different chains
+      pair_mask *= asym_id[:, None] != asym_id[None, :]
+  ```
+
+  The `asym_id` array holds an integer chain identifier per residue, so `asym_id[i] != asym_id[j]` is True only for cross-chain pairs.
+</Accordion>
+
+<Accordion title="Multimer ranking formula">
+  For multimer runs, model ranking uses a weighted combination of ipTM and pTM:
+
+  ```
+  ranking_confidence = 0.8 × ipTM + 0.2 × pTM
+  ```
+
+  This formula weights interface confidence more heavily because inter-chain contact prediction is a stronger signal for complex quality than overall structure prediction accuracy.
+
+  ```python
+  import pickle
+
+  # File is named result_model_1_multimer_v3_pred_0.pkl for multimer preset
+  with open('result_model_1_multimer_v3_pred_0.pkl', 'rb') as f:
+      result = pickle.load(f)
+
+  iptm = result['iptm']
+  ptm = result['ptm']
+  ranking_confidence = 0.8 * iptm + 0.2 * ptm
+  print(f"ipTM: {iptm:.4f}, pTM: {ptm:.4f}, Ranking: {ranking_confidence:.4f}")
+  ```
+
+  `ranking_debug.json` records these values for all models in a run.
+</Accordion>
+
+---
+
+## PAE — Predicted Aligned Error
+
+<Accordion title="Definition and computation">
+  PAE is an `N_res × N_res` matrix where the value at position `(i, j)` is the expected position error at residue `i` (in Ångströms) when the prediction is aligned on residue `j`.
+
+  Low PAE between two residues means the model is confident in their relative positions. High PAE means the model is uncertain — typically because the two residues are in different domains that pack independently.
+
+  The `PredictedAlignedErrorHead` outputs logits of shape `[N_res, N_res, 64]` over 64 error bins spanning 0–31 Å (`max_error_bin=31.0`). These are converted to the expected error by `compute_predicted_aligned_error`:
+
+  ```python
+  # alphafold/common/confidence.py
+
+  def compute_predicted_aligned_error(
+      logits: np.ndarray, breaks: np.ndarray
+  ) -> Dict[str, np.ndarray]:
+      """Computes aligned confidence metrics from logits.
+
+      Args:
+        logits: [num_res, num_res, num_bins] the logits output from
+          PredictedAlignedErrorHead.
+        breaks: [num_bins - 1] the error bin edges.
+
+      Returns:
+        aligned_confidence_probs: [num_res, num_res, num_bins] the predicted
+          aligned error probabilities over bins for each residue pair.
+        predicted_aligned_error: [num_res, num_res] the expected aligned distance
+          error for each pair of residues.
+        max_predicted_aligned_error: The maximum predicted error possible.
+      """
+      aligned_confidence_probs = np.array(_softmax(logits, axis=-1))
+      predicted_aligned_error, max_predicted_aligned_error = (
+          _calculate_expected_aligned_error(
+              alignment_confidence_breaks=breaks,
+              aligned_distance_error_probs=aligned_confidence_probs,
+          )
+      )
+      return {
+          'aligned_confidence_probs': aligned_confidence_probs,
+          'predicted_aligned_error': predicted_aligned_error,
+          'max_predicted_aligned_error': max_predicted_aligned_error,
+      }
+  ```
+
+  The bin edges are `num_bins - 1 = 63` values uniformly spaced in `[0, 31.0]` Å (0.5 Å per bin), plus a catch-all final bin covering `[31 Å, +∞)`.
+</Accordion>
+
+<Accordion title="Interpreting PAE">
+  PAE is especially useful for assessing **domain packing confidence**. Consider a two-domain protein:
+
+  - A low-PAE block along the diagonal within each domain indicates confident intra-domain structure.
+  - A low-PAE block in the off-diagonal region indicates confident inter-domain packing.
+  - High PAE in the off-diagonal region means the relative orientation of the two domains is uncertain — they may tumble independently.
+
+  For complexes, PAE reveals which chain-chain interfaces the model is confident about:
+  - Low cross-chain PAE → confident interface prediction
+  - High cross-chain PAE → interface is speculative; the chains may not interact in reality
+
+  **Note:** PAE is asymmetric. `PAE[i, j] ≠ PAE[j, i]` in general.
+</Accordion>
+
+<Accordion title="Access from pkl files">
+  PAE is stored in `result_model_*.pkl` under the key `predicted_aligned_error` (available only for pTM and multimer models).
+
+  ```python
+  import pickle
+  import numpy as np
+
+  # File is named result_model_1_ptm_pred_0.pkl for monomer_ptm preset
+  with open('result_model_1_ptm_pred_0.pkl', 'rb') as f:
+      result = pickle.load(f)
+
+  # Shape: [N_res, N_res], values in Angstroms [0, max_pae]
+  pae = result['predicted_aligned_error']
+  max_pae = result['max_predicted_aligned_error']
+
+  print(f"PAE matrix shape: {pae.shape}")
+  print(f"Max possible PAE: {max_pae:.1f} Å")
+  print(f"Mean PAE: {np.mean(pae):.2f} Å")
+
+  # Identify residue pairs with confident relative positioning
+  confident_pairs = np.argwhere(pae < 5.0)  # < 5 Å threshold
+  print(f"Residue pairs with PAE < 5 Å: {len(confident_pairs)}")
+  ```
+
+  PAE is also exported in AlphaFold Database JSON format by the `pae_json` function:
+
+  ```python
+  from alphafold.common.confidence import pae_json
+
+  json_str = pae_json(pae=pae, max_pae=float(max_pae))
+  # Returns a JSON string matching the AFDB format
+  ```
+</Accordion>
+
+---
+
+## Summary and Usage Guide
+
+| Metric | Range | Higher is | Available in | Used for |
+|---|---|---|---|---|
+| pLDDT | 0–100 | Better | All models | Per-residue confidence, monomer ranking, B-factor column |
+| pTM | 0–1 | Better | pTM + multimer models only | Global fold confidence |
+| ipTM | 0–1 | Better | Multimer models only | Interface confidence, multimer ranking |
+| PAE | 0–31 Å | Worse | pTM + multimer models only | Domain packing, inter-chain confidence |
+
+<Tip>
+  For a quick assessment of a monomer prediction, check mean pLDDT. For complexes, use the ipTM score and examine the cross-chain PAE matrix to understand which interfaces the model is confident about.
+</Tip>
+
+### Reading all metrics from a pkl file
+
+```python
+import pickle
+import numpy as np
+from alphafold.common.confidence import compute_plddt, compute_predicted_aligned_error
+
+with open('result_model_1_ptm_pred_0.pkl', 'rb') as f:
+    result = pickle.load(f)
+
+# pLDDT: always present
+plddt = result['plddt']  # [N_res], 0–100
+
+# pTM: only in ptm/multimer models
+ptm = result.get('ptm')  # scalar or None
+
+# PAE: only in ptm/multimer models
+pae = result.get('predicted_aligned_error')  # [N_res, N_res] or None
+max_pae = result.get('max_predicted_aligned_error')
+
+# ipTM: only in multimer models
+iptm = result.get('iptm')  # scalar or None
+
+print(f"Mean pLDDT: {np.mean(plddt):.2f}")
+if ptm is not None:
+    print(f"pTM: {ptm:.4f}")
+if iptm is not None:
+    print(f"ipTM: {iptm:.4f}")
+    print(f"Ranking confidence: {0.8 * iptm + 0.2 * ptm:.4f}")
+```

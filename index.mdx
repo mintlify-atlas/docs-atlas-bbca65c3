@@ -1,97 +1,58 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "AlphaFold"
+description: "Highly accurate protein structure prediction from amino acid sequences — open source from Google DeepMind."
 ---
 
-## Setting up
+AlphaFold is an AI system developed by Google DeepMind that predicts a protein's 3D structure from its amino acid sequence with unprecedented accuracy. This documentation covers installation, running predictions, understanding outputs, and the Python API.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up AlphaFold with Docker and download the required genetic databases and model parameters.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first protein structure prediction in minutes with a step-by-step guide.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Running AlphaFold" icon="play" href="/running/monomer">
+    Learn how to fold monomers, multimers, and protein complexes with different model presets.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Python API" icon="code" href="/reference/python-api">
+    Integrate AlphaFold directly into your Python workflows using the programmatic API.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What AlphaFold can predict
 
-Everything you need to create world-class documentation.
+AlphaFold v2 predicts protein structures with accuracy competitive with experimental methods. It supports:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Single-chain proteins" icon="dna" href="/running/monomer">
+    Predict the structure of any single protein chain (monomer) using multiple model presets optimized for accuracy and speed.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Protein complexes" icon="circle-nodes" href="/running/multimer">
+    Predict the structure of protein complexes — homomers (multiple copies of the same chain) and heteromers (different chains) — using AlphaFold-Multimer.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Confidence metrics" icon="chart-bar" href="/concepts/confidence-metrics">
+    Every prediction includes per-residue pLDDT scores and predicted aligned error (PAE) matrices so you can assess reliability.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Genetic databases" icon="database" href="/data/genetic-databases">
+    AlphaFold searches multiple sequence databases to build deep multiple sequence alignments that inform structure prediction.
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## How it works
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Prepare your sequence">
+    Create a FASTA file with the amino acid sequence(s) you want to fold. For multimers, include all chains in the same file.
+  </Step>
+  <Step title="Run AlphaFold">
+    Use the Docker script to launch a prediction. AlphaFold searches genetic databases, builds MSAs, searches for structural templates, and runs the neural network model.
+  </Step>
+  <Step title="Analyze outputs">
+    The prediction produces ranked PDB structure files, per-residue pLDDT confidence scores, and PAE matrices for assessing domain packing confidence.
+  </Step>
+</Steps>
+
+<Note>
+  AlphaFold requires a Linux machine with an NVIDIA GPU. Full database setup requires approximately 2.62 TB of disk space. See [Installation](/installation) for hardware requirements.
+</Note>

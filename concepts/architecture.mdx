@@ -1,0 +1,272 @@
+---
+title: "Model Architecture"
+description: "An overview of the AlphaFold v2 neural network, its major components, model variants, and how recycling drives accurate structure prediction."
+---
+
+AlphaFold v2 is a deep learning system built in [JAX](https://github.com/google/jax) and [Haiku](https://github.com/deepmind/dm-haiku) that predicts protein 3D structure directly from amino acid sequence. The architecture is described in full in Jumper et al. (2021), *Nature* 596, 583–589 ([doi: 10.1038/s41586-021-03819-2](https://doi.org/10.1038/s41586-021-03819-2)).
+
+At a high level, the model:
+
+1. Embeds the input MSA and sequence features into an MSA representation and a pairwise representation.
+2. Iteratively refines both representations through a stack of **Evoformer** blocks.
+3. Passes the refined single-sequence and pair representations to the **Structure Module**, which outputs 3D coordinates.
+4. Runs a set of **prediction heads** to produce confidence scores and auxiliary outputs.
+5. Optionally **recycles** the output back as input for additional refinement passes.
+
+---
+
+## Input Features
+
+The model consumes three categories of input features, assembled by the data pipeline and stored in `features.pkl`:
+
+| Feature group | Key tensors | Shape |
+|---|---|---|
+| Sequence | `aatype`, `residue_index`, `seq_length` | `[N_res]` |
+| MSA | `msa`, `msa_feat`, `deletion_matrix_int`, `num_alignments` | `[N_seq, N_res, …]` |
+| Templates | `template_aatype`, `template_all_atom_positions`, `template_all_atom_masks` | `[N_templates, N_res, …]` |
+
+Templates are enabled in model_1 and model_2 (and their pTM variants) by setting `use_templates: True` in the config. Models 3–5 disable templates at the data level but still retain the template sub-network in the graph.
+
+---
+
+## Architecture Components
+
+<Accordion title="Input Embedder">
+  The `EmbeddingsAndEvoformer` module (`alphafold/model/modules.py:1904`) embeds the raw input features before the Evoformer stack:
+
+  - A **1D sequence embedding** is computed from `target_feat` and broadcast across the MSA dimension.
+  - An **MSA embedding** is computed from `msa_feat` (one-hot amino acid identity, deletion values, cluster profile).
+  - A **pair embedding** is initialized from left and right linear projections of the single sequence feature, giving an `[N_res, N_res, c_z]` tensor.
+  - A **relative position encoding** encodes sequence distance up to `max_relative_feature=32` into the pair representation.
+  - **Recycling** injects the previous iteration's pair representation, single-sequence representation, and Cβ pseudo-distances into the current pass (Suppl. Alg. 32 "RecyclingEmbedder").
+
+  ```
+  MSA channel width (c_m):   256
+  Pair channel width (c_z):  128
+  Single channel width (c_s): 384
+  Extra MSA channel:          64
+  ```
+</Accordion>
+
+<Accordion title="Evoformer Stack">
+  The Evoformer (`EvoformerIteration`, `alphafold/model/modules.py:1751`) is the core of AlphaFold. It consists of **48 blocks**, each of which updates both the MSA representation and the pair representation in an interleaved fashion.
+
+  Within each block (Suppl. Alg. 6 "EvoformerStack"):
+
+  | Operation | Acts on | Description |
+  |---|---|---|
+  | MSA row attention with pair bias | MSA `[N_seq, N_res, c_m]` | Attention across the residue axis; pair representation provides bias |
+  | MSA column attention | MSA `[N_seq, N_res, c_m]` | Attention across the sequence axis, relating homologous positions |
+  | MSA transition | MSA | Feed-forward transition (factor 4) |
+  | Outer product mean | MSA → pair | Collapses MSA depth by outer product, updates pair representation |
+  | Triangle multiplication (outgoing) | Pair `[N_res, N_res, c_z]` | Message passing via triangle inequality (outgoing edges) |
+  | Triangle multiplication (incoming) | Pair `[N_res, N_res, c_z]` | Message passing via triangle inequality (incoming edges) |
+  | Triangle self-attention (starting node) | Pair | Attention biased by row |
+  | Triangle self-attention (ending node) | Pair | Attention biased by column |
+  | Pair transition | Pair | Feed-forward transition (factor 4) |
+
+  An extra MSA stack with 4 blocks processes a larger set of extra MSA sequences (`max_extra_msa`) using global column attention, compressing them before they enter the main Evoformer.
+
+  **Key dimensions from `config.py`:**
+  ```python
+  evoformer_num_block = 48
+  extra_msa_stack_num_block = 4
+  msa_channel = 256         # c_m
+  pair_channel = 128        # c_z
+  seq_channel = 384         # c_s
+  extra_msa_channel = 64
+  ```
+</Accordion>
+
+<Accordion title="Template Sub-network">
+  When templates are enabled (`model.embeddings_and_evoformer.template.enabled = True`), each of the up to `max_templates=4` template structures is embedded independently and then added into the pair representation.
+
+  The template embedding path uses:
+  - **Distogram features** binned from 3.25 Å to 50.75 Å (39 bins) computed from template Cβ positions.
+  - **Torsion angles** (if `embed_torsion_angles=True`, active in model_1 and model_2).
+  - A **TemplatePairStack** (2 blocks of triangle attention and multiplication) to process per-template pair features.
+  - A **template attention** module that pools over the template axis into the main pair representation.
+</Accordion>
+
+<Accordion title="Structure Module">
+  The Structure Module (`folding.StructureModule`, `alphafold/model/folding.py:465`) translates the pair and single representations into 3D atomic coordinates.
+
+  It consists of **8 layers** operating on invariant point attention (IPA), which is equivariant to rigid-body transformations. Each layer:
+  1. Applies IPA over the current backbone frames and single representation.
+  2. Updates backbone frames via a learned 6-DoF transformation (translation + quaternion).
+  3. Predicts side-chain torsion angles from a 2-block residual MLP.
+
+  The loss used during training is **FAPE** (Frame-Aligned Point Error), computed in local coordinate frames with a 10 Å clamp:
+
+  ```python
+  'structure_module': {
+      'num_layer': 8,
+      'fape': {
+          'clamp_distance': 10.0,
+          'clamp_type': 'relu',
+          'loss_unit_distance': 10.0,
+      },
+      'num_channel': 384,
+      'num_head': 12,
+      'num_point_qk': 4,
+      'num_point_v': 8,
+      'num_scalar_qk': 16,
+      'num_scalar_v': 16,
+  }
+  ```
+
+  Outputs: `final_atom_positions [N_res, 37, 3]` and `final_atom_mask [N_res, 37]` in atom37 representation.
+</Accordion>
+
+<Accordion title="Prediction Heads">
+  After the structure module runs, four auxiliary heads compute outputs that serve as confidence signals and training losses:
+
+  | Head | Output | Shape | Purpose |
+  |---|---|---|---|
+  | `PredictedLDDTHead` | `logits` → `plddt` | `[N_res, 50]` → `[N_res]` | Per-residue confidence (0–100) |
+  | `PredictedAlignedErrorHead` | `logits` + `predicted_aligned_error` | `[N_res, N_res, 64]` | PAE matrix; enables pTM and ipTM |
+  | `DistogramHead` | `logits`, `bin_edges` | `[N_res, N_res, 64]` | Pairwise Cβ distance distribution |
+  | `MaskedMsaHead` | `logits` | `[N_seq, N_res, 23]` | BERT-style MSA recovery (training signal) |
+
+  The `PredictedAlignedErrorHead` is only active (weight > 0) in pTM and multimer model variants. See [Confidence Metrics](/concepts/confidence-metrics) for a detailed breakdown of how these outputs are interpreted.
+</Accordion>
+
+---
+
+## Recycling
+
+AlphaFold uses **iterative recycling** to progressively refine its predictions. At the end of each recycling pass, three tensors are extracted from the result and injected into the next pass:
+
+```python
+# From AlphaFold.__call__ in alphafold/model/modules.py
+def get_prev(ret):
+    new_prev = {
+        'prev_pos': ret['structure_module']['final_atom_positions'],
+        'prev_msa_first_row': ret['representations']['msa_first_row'],
+        'prev_pair': ret['representations']['pair'],
+    }
+    return jax.tree.map(jax.lax.stop_gradient, new_prev)
+```
+
+The previous atom positions are encoded as Cβ pseudo-distance bins and added back into the pair representation. The previous MSA first-row and pair representations are added back directly after layer normalization (the RecyclingEmbedder).
+
+**Default recycle counts:**
+- Monomer models: `num_recycle = 3`
+- Multimer v3 models: `num_recycle = 20` with early stopping (`recycle_early_stop_tolerance = 0.5 Å`)
+
+During inference, the model always runs the full `num_recycle` iterations (no training-time randomization of the count).
+
+---
+
+## Model Presets and Variants
+
+AlphaFold ships with three model presets, each backed by five independently trained model parameter sets.
+
+<Tabs>
+  <Tab title="Monomer">
+    The five monomer models (`model_1` through `model_5`) differ in template usage and extra MSA depth:
+
+    | Model | Templates | Embed torsion angles | `max_extra_msa` |
+    |---|---|---|---|
+    | model_1 | Yes | Yes | 5120 |
+    | model_2 | Yes | Yes | 1024 (default) |
+    | model_3 | No | No | 5120 |
+    | model_4 | No | No | 5120 |
+    | model_5 | No | No | 1024 (default) |
+
+    The `monomer_casp14` preset uses the same five models but runs with `num_ensemble=8`, replicating the CASP14 submission configuration. This is 8× more computationally expensive for approximately +0.1 GDT accuracy gain.
+
+    Ranking for monomers uses mean pLDDT across all residues.
+  </Tab>
+  <Tab title="Monomer pTM">
+    The `monomer_ptm` preset uses five pTM-finetuned models (`model_1_ptm` through `model_5_ptm`). These are identical to the corresponding monomer models but with the `PredictedAlignedErrorHead` weight set to `0.1` during fine-tuning:
+
+    ```python
+    'model_1_ptm': {
+        # same template/MSA config as model_1, plus:
+        'model.heads.predicted_aligned_error.weight': 0.1,
+    }
+    ```
+
+    pTM models output `ptm` and `predicted_aligned_error` in `result_model_*.pkl`. They are slightly less accurate on raw structure prediction than the base monomer models due to the additional head.
+  </Tab>
+  <Tab title="Multimer">
+    The `multimer` preset uses five `model_*_multimer_v3` models (current default as of v2.3.0). These models share a different base config (`CONFIG_MULTIMER`) with key differences from the monomer config:
+
+    | Parameter | Monomer | Multimer v3 |
+    |---|---|---|
+    | `num_recycle` | 3 | 20 (with early stop) |
+    | `num_msa` | 512 (max clusters) | 508 |
+    | `num_extra_msa` | 1024 | 2048 (models 1–3) / 1152 (models 4–5) |
+    | `multimer_mode` | False | True |
+    | `bfloat16` | False | True |
+    | `use_chain_relative` | False | True |
+    | Templates | Optional per model | Always enabled |
+
+    Chain-relative position encoding (`use_chain_relative=True`, `max_relative_chain=2`) encodes both within-chain residue distances and cross-chain chain-offset, enabling the model to reason about multi-chain topology.
+
+    By default, 5 seeds per model are run (25 total predictions). Ranking uses `0.8 * iptm + 0.2 * ptm`.
+  </Tab>
+</Tabs>
+
+---
+
+## Inference vs. Training
+
+| Aspect | Training | Inference |
+|---|---|---|
+| `is_training` flag | `True` | `False` |
+| Dropout | Applied | Disabled |
+| `num_recycle` | Sampled uniformly in `[0, num_recycle]` | Fixed at `num_recycle` |
+| Ensemble | Multiple crops averaged | Single crop (`num_ensemble=1`) |
+| Loss heads | All heads compute losses | Only forward pass |
+| Remat (gradient checkpointing) | Optional (`use_remat`) | Off |
+
+---
+
+## Performance
+
+Prediction runtimes on a single NVIDIA A100 GPU (three recycles, excluding MSA search). These timings are stored in `timings.json` when running with `--benchmark=true`.
+
+| Residues | Prediction time (s) |
+|---:|---:|
+| 100 | 4.9 |
+| 200 | 7.7 |
+| 300 | 13 |
+| 500 | 29 |
+| 1,000 | 96 |
+| 1,500 | 280 |
+| 2,000 | 450 |
+| 3,000 | 1,240 |
+| 4,000 | 5,660 |
+| 5,000 | 18,824 |
+
+<Note>
+  JAX compiles the model specialized to the exact shape of the input sequence, MSA, and templates. For bulk inference over many proteins of similar size, use `make_fixed_size` to pad inputs to a uniform size and reduce recompilation overhead.
+</Note>
+
+For smaller proteins on A100, prediction speed can be improved by increasing `global_config.subbatch_size` in `alphafold/model/config.py`.
+
+---
+
+## Framework
+
+AlphaFold is implemented in:
+
+- **JAX** — accelerated array computation and automatic differentiation
+- **Haiku** — neural network library on top of JAX (all model modules inherit `hk.Module`)
+- **ml_collections** — structured configuration (`CONFIG`, `CONFIG_MULTIMER`, `CONFIG_DIFFS`)
+
+The top-level model classes are `AlphaFold` (monomer, `modules.py:289`) and the multimer variant in `modules_multimer.py`. Both expose a `__call__(batch, is_training, ...)` interface that returns a nested dictionary of head outputs.
+
+---
+
+## Citation
+
+If you use AlphaFold, please cite:
+
+> Jumper, J. et al. Highly accurate protein structure prediction with AlphaFold. *Nature* **596**, 583–589 (2021). [https://doi.org/10.1038/s41586-021-03819-2](https://doi.org/10.1038/s41586-021-03819-2)
+
+For AlphaFold-Multimer:
+
+> Evans, R. et al. Protein complex prediction with AlphaFold-Multimer. *bioRxiv* (2021). [https://doi.org/10.1101/2021.10.04.463034](https://doi.org/10.1101/2021.10.04.463034)

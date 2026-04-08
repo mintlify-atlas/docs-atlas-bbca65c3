@@ -1,0 +1,369 @@
+---
+title: "MSA Pipeline"
+description: "How AlphaFold constructs Multiple Sequence Alignments from genetic databases, which tools it uses, and how to work with precomputed MSAs."
+---
+
+A **Multiple Sequence Alignment (MSA)** is the primary information source that lets AlphaFold infer evolutionary constraints on a protein. Positions that are conserved across thousands of homologous sequences tend to be structurally or functionally important. Pairs of positions that co-evolve — varying together across species — often indicate direct physical contact in the folded structure. The Evoformer network learns to extract these patterns from the MSA and use them to constrain the predicted 3D structure.
+
+AlphaFold's data pipeline (`alphafold/data/pipeline.py`) orchestrates multiple search tools against several genetic databases, producing MSA files that are then parsed into numerical feature arrays for the model.
+
+<Note>
+  The full database set requires approximately 2.62 TB of disk space. A `reduced_dbs` preset is available that uses only `small_bfd` (≈17 GB) instead of the full BFD + UniRef30 (≈2 TB combined), at the cost of some accuracy.
+</Note>
+
+---
+
+## Search Tools
+
+AlphaFold uses four external tools for sequence search and alignment, each wrapped by a Python class in `alphafold/data/tools/`:
+
+| Tool | Class | Output format | Purpose |
+|---|---|---|---|
+| JackHMMER | `Jackhmmer` (`jackhmmer.py`) | Stockholm (STO) | Iterative profile-HMM search; used for UniRef90 and MGnify |
+| HHblits | `HHBlits` (`hhblits.py`) | A3M | Fast HMM-HMM search; used for BFD + UniRef30 |
+| HHsearch | `HHSearch` (`hhsearch.py`) | HHR | Template search against PDB70 (monomer pipeline) |
+| Hmmsearch | `Hmmsearch` (`hmmsearch.py`) | STO | Template search against PDB seqres (multimer pipeline) |
+| Kalign | `Kalign` (`kalign.py`) | A3M | MSA re-alignment utility used in template processing |
+
+### JackHMMER
+
+JackHMMER performs iterative profile-HMM searches, building a sequence profile from each search iteration's hits and using it to search again. AlphaFold uses a single iteration (`n_iter=1`) for all JackHMMER searches:
+
+```python
+# alphafold/data/tools/jackhmmer.py
+
+class Jackhmmer:
+    def __init__(
+        self,
+        *,
+        binary_path: str,
+        database_path: str,
+        n_cpu: int = 8,
+        n_iter: int = 1,
+        e_value: float = 0.0001,
+        z_value: Optional[int] = None,
+        filter_f1: float = 0.0005,
+        filter_f2: float = 0.00005,
+        filter_f3: float = 0.0000005,
+        ...
+    ):
+```
+
+### HHblits
+
+HHblits searches a sequence or profile against a database of profile HMMs. AlphaFold uses three iterations against the combined BFD + UniRef30 databases:
+
+```python
+# alphafold/data/tools/hhblits.py
+
+class HHBlits:
+    def __init__(
+        self,
+        *,
+        binary_path: str,
+        databases: Sequence[str],   # [bfd_path, uniref30_path]
+        n_cpu: int = 4,
+        n_iter: int = 3,
+        e_value: float = 0.001,
+        maxseq: int = 1_000_000,
+        realign_max: int = 100_000,
+        maxfilt: int = 100_000,
+        min_prefilter_hits: int = 1000,
+        ...
+    ):
+```
+
+---
+
+## Genetic Databases
+
+| Database | Size (download) | Used by | Purpose |
+|---|---|---|---|
+| UniRef90 | ~34 GB | JackHMMER | Clustered UniProtKB at 90% identity; main sequence search database |
+| MGnify | ~67 GB | JackHMMER | Metagenomics sequences; adds environmental diversity |
+| BFD | ~271.6 GB | HHblits | Big Fantastic Database; large-scale clustered sequences |
+| UniRef30 | ~52.5 GB | HHblits | Clustered UniRef at 30% identity; used jointly with BFD |
+| small_bfd | ~9.6 GB | JackHMMER | Reduced version of BFD for the `reduced_dbs` preset |
+| PDB70 | ~19.5 GB | HHsearch | Monomer template search; profiles built from PDB chains |
+| PDB seqres | ~0.2 GB | Hmmsearch | Multimer template search; full PDB sequence database |
+| PDB mmCIF | ~43 GB | Template featurizer | Raw structure files for template feature extraction |
+| UniProt | ~53 GB | Multimer pipeline | Full UniProtKB; used for paired MSA construction in multimers |
+
+---
+
+## Monomer Pipeline
+
+The `DataPipeline` class in `alphafold/data/pipeline.py` orchestrates the full monomer MSA and template search.
+
+<Steps>
+  <Step title="JackHMMER search against UniRef90">
+    The query sequence is searched against UniRef90, producing a Stockholm-format alignment (`uniref90_hits.sto`). This is the largest MSA and the most sequence-diverse source. Results are capped at `uniref_max_hits=10000` sequences.
+
+    ```python
+    jackhmmer_uniref90_result = run_msa_tool(
+        msa_runner=self.jackhmmer_uniref90_runner,
+        input_fasta_path=input_fasta_path,
+        msa_out_path=uniref90_out_path,  # 'msas/uniref90_hits.sto'
+        msa_format='sto',
+        use_precomputed_msas=self.use_precomputed_msas,
+        max_sto_sequences=self.uniref_max_hits,
+    )
+    ```
+  </Step>
+
+  <Step title="JackHMMER search against MGnify">
+    The same query is searched against the MGnify metagenomics database, producing `mgnify_hits.sto`. Results are capped at `mgnify_max_hits=501` sequences by default, as metagenomics hits are noisier.
+
+    ```python
+    jackhmmer_mgnify_result = run_msa_tool(
+        msa_runner=self.jackhmmer_mgnify_runner,
+        input_fasta_path=input_fasta_path,
+        msa_out_path=mgnify_out_path,    # 'msas/mgnify_hits.sto'
+        msa_format='sto',
+        use_precomputed_msas=self.use_precomputed_msas,
+        max_sto_sequences=self.mgnify_max_hits,
+    )
+    ```
+  </Step>
+
+  <Step title="Template search against PDB70 (or PDB seqres)">
+    The UniRef90 Stockholm alignment is deduplicated, stripped of empty columns, and then passed to the template searcher. For monomer runs, `HHSearch` searches it against PDB70 in A3M format. For multimer runs, `Hmmsearch` is used instead.
+
+    ```python
+    msa_for_templates = parsers.deduplicate_stockholm_msa(
+        jackhmmer_uniref90_result['sto']
+    )
+    msa_for_templates = parsers.remove_empty_columns_from_stockholm_msa(
+        msa_for_templates
+    )
+
+    if self.template_searcher.input_format == 'sto':
+        pdb_templates_result = self.template_searcher.query(msa_for_templates)
+    elif self.template_searcher.input_format == 'a3m':
+        uniref90_msa_as_a3m = parsers.convert_stockholm_to_a3m(msa_for_templates)
+        pdb_templates_result = self.template_searcher.query(uniref90_msa_as_a3m)
+    ```
+
+    Template hits are saved to `msas/pdb_hits.hhr` (HHsearch) or `msas/pdb_hits.sto` (Hmmsearch). Up to `max_templates=4` templates pass into the model.
+  </Step>
+
+  <Step title="HHblits search against BFD + UniRef30 (full_dbs) or small_bfd (reduced_dbs)">
+    For the `full_dbs` preset, HHblits searches the query against both BFD and UniRef30 simultaneously, producing an A3M file (`bfd_uniref_hits.a3m`). For the `reduced_dbs` preset, JackHMMER searches the smaller `small_bfd`, producing `small_bfd_hits.sto`.
+
+    ```python
+    if self._use_small_bfd:
+        # reduced_dbs preset
+        bfd_out_path = os.path.join(msa_output_dir, 'small_bfd_hits.sto')
+        jackhmmer_small_bfd_result = run_msa_tool(
+            msa_runner=self.jackhmmer_small_bfd_runner,
+            input_fasta_path=input_fasta_path,
+            msa_out_path=bfd_out_path,
+            msa_format='sto',
+            use_precomputed_msas=self.use_precomputed_msas,
+        )
+        bfd_msa = parsers.parse_stockholm(jackhmmer_small_bfd_result['sto'])
+    else:
+        # full_dbs preset
+        bfd_out_path = os.path.join(msa_output_dir, 'bfd_uniref_hits.a3m')
+        hhblits_bfd_uniref_result = run_msa_tool(
+            msa_runner=self.hhblits_bfd_uniref_runner,
+            input_fasta_path=input_fasta_path,
+            msa_out_path=bfd_out_path,
+            msa_format='a3m',
+            use_precomputed_msas=self.use_precomputed_msas,
+        )
+        bfd_msa = parsers.parse_a3m(hhblits_bfd_uniref_result['a3m'])
+    ```
+  </Step>
+
+  <Step title="Assemble feature dictionary">
+    All three MSAs (UniRef90, MGnify, BFD/small_bfd) are combined and deduplicated. Duplicate sequences across databases are removed using a seen-set approach in `make_msa_features`:
+
+    ```python
+    msa_features = make_msa_features((uniref90_msa, bfd_msa, mgnify_msa))
+    ```
+
+    Template features are computed by the `TemplateHitFeaturizer`, which reads the matched PDB mmCIF files and extracts atomic positions and torsion angles for up to 4 top-ranked templates.
+
+    The final return from `DataPipeline.process` is a merged dictionary:
+
+    ```python
+    return {**sequence_features, **msa_features, **templates_result.features}
+    ```
+
+    This dictionary is the `features.pkl` file written to disk.
+  </Step>
+</Steps>
+
+---
+
+## MSA Output Files
+
+After a completed run, the `msas/` subdirectory in the output folder contains:
+
+| File | Format | Source | Description |
+|---|---|---|---|
+| `uniref90_hits.sto` | Stockholm | JackHMMER | Hits from UniRef90; up to 10,000 sequences |
+| `mgnify_hits.sto` | Stockholm | JackHMMER | Hits from MGnify; up to 501 sequences |
+| `bfd_uniref_hits.a3m` | A3M | HHblits | Hits from BFD + UniRef30 combined (full_dbs) |
+| `small_bfd_hits.sto` | Stockholm | JackHMMER | Hits from small_bfd (reduced_dbs) |
+| `pdb_hits.hhr` | HHR | HHsearch | Template hits for monomer pipeline |
+| `pdb_hits.sto` | Stockholm | Hmmsearch | Template hits for multimer pipeline |
+
+### MSA formats
+
+**A3M** is a compact alignment format where insertions relative to the query are in lowercase. It is the native output of HHblits.
+
+**Stockholm (STO)** is the native output of JackHMMER and Hmmsearch. It includes metadata annotations and uses `-` for gaps and `.` for insertions. AlphaFold parses both formats via `parsers.parse_a3m` and `parsers.parse_stockholm`.
+
+---
+
+## Multimer Pipeline
+
+For multimer predictions, `DataPipelineMultimer` (in `alphafold/data/pipeline_multimer.py`) runs the monomer `DataPipeline.process` independently for each unique chain sequence in the input FASTA. It then pairs MSA sequences across chains using species identifiers to create paired MSA rows that represent co-occurring homologs.
+
+<Tabs>
+  <Tab title="Monomer pipeline">
+    ```
+    Input FASTA (single sequence)
+          │
+          ├─ JackHMMER ──► UniRef90 ──► uniref90_hits.sto
+          ├─ JackHMMER ──► MGnify   ──► mgnify_hits.sto
+          ├─ HHblits   ──► BFD+UniRef30 ─► bfd_uniref_hits.a3m
+          └─ HHsearch  ──► PDB70 ──► pdb_hits.hhr
+                                         │
+                              TemplateHitFeaturizer
+                                         │
+                              Merged features.pkl
+    ```
+  </Tab>
+  <Tab title="Multimer pipeline">
+    ```
+    Input FASTA (N chains)
+          │
+          ├─ Per-chain DataPipeline.process (UniRef90, MGnify, BFD)
+          │    └── monomer_features[chain_id] for each unique chain
+          │
+          ├─ MSA pairing: match homologs by species identifier
+          │    using UniProt and UniRef90 species metadata
+          │
+          ├─ Hmmsearch ──► PDB seqres ──► template hits per chain
+          │
+          └─ Merged multimer features.pkl
+               (paired + unpaired MSA blocks, chain-relative positions)
+    ```
+
+    The multimer pipeline also uses the full UniProt database (not just UniRef90) to maximize species identification coverage for MSA pairing.
+  </Tab>
+</Tabs>
+
+---
+
+## Precomputed MSAs
+
+If you are running multiple AlphaFold experiments on the same sequence (e.g., sweeping over templates or model parameters), you can skip the MSA search step by reusing previously generated files:
+
+```bash
+python3 docker/run_docker.py \
+  --fasta_paths=your_protein.fasta \
+  --max_template_date=2022-01-01 \
+  --data_dir=$DOWNLOAD_DIR \
+  --output_dir=/path/to/output \
+  --use_precomputed_msas=true
+```
+
+When `--use_precomputed_msas=true`, `run_msa_tool` checks whether the output file already exists and reads it directly instead of running the search tool:
+
+```python
+# alphafold/data/pipeline.py
+
+def run_msa_tool(
+    msa_runner,
+    input_fasta_path: str,
+    msa_out_path: str,
+    msa_format: str,
+    use_precomputed_msas: bool,
+    max_sto_sequences: Optional[int] = None,
+) -> Mapping[str, Any]:
+    """Runs an MSA tool, checking if output already exists first."""
+    if not use_precomputed_msas or not os.path.exists(msa_out_path):
+        # Run the search tool
+        result = msa_runner.query(input_fasta_path)[0]
+        with open(msa_out_path, 'w') as f:
+            f.write(result[msa_format])
+    else:
+        logging.warning('Reading MSA from file %s', msa_out_path)
+        # Read the precomputed file
+        with open(msa_out_path, 'r') as f:
+            result = {msa_format: f.read()}
+    return result
+```
+
+<Warning>
+  `--use_precomputed_msas=true` assumes the output directory structure from a previous AlphaFold run is intact and that the protein sequence has not changed. If the sequence has changed, delete the old MSA files and rerun without this flag.
+</Warning>
+
+---
+
+## Bulk Inference Optimization
+
+By default, AlphaFold compiles the JAX model specialized to the exact dimensions of the input (sequence length, MSA depth, number of templates). For large proteins this compilation cost is negligible, but for small proteins or when processing many sequences this can dominate runtime.
+
+For bulk inference, use `make_fixed_size` to pad all inputs to a uniform size before running the model:
+
+```python
+from alphafold.model import model
+from alphafold.data import pipeline
+from alphafold.data import feature_processing
+
+# Pad all features to fixed dimensions to avoid recompilation
+feature_dict = pipeline.make_fixed_size(
+    feat=feature_dict,
+    shape_schema=model_config.data.eval.feat,
+    msa_cluster_size=max_msa_clusters,
+    extra_msa_size=max_extra_msa,
+    num_res=max_sequence_length,
+    num_templates=max_templates,
+)
+```
+
+With a padded feature dictionary, all inputs have the same shape regardless of the actual sequence, so JAX only compiles the model once. Precomputing MSAs for all sequences first (using `--use_precomputed_msas=true` on subsequent runs) and then batching model inference is the recommended pattern for large-scale prediction jobs.
+
+---
+
+## DataPipeline API Reference
+
+```python
+# alphafold/data/pipeline.py
+
+class DataPipeline:
+    """Runs the alignment tools and assembles the input features."""
+
+    def __init__(
+        self,
+        *,
+        jackhmmer_binary_path: str,
+        hhblits_binary_path: str,
+        uniref90_database_path: str,
+        mgnify_database_path: str,
+        bfd_database_path: Optional[str],
+        uniref30_database_path: Optional[str],
+        small_bfd_database_path: Optional[str],
+        template_searcher: TemplateSearcher,        # HHSearch or Hmmsearch
+        template_featurizer: templates.TemplateHitFeaturizer,
+        use_small_bfd: bool,
+        mgnify_max_hits: int = 501,
+        uniref_max_hits: int = 10000,
+        use_precomputed_msas: bool = False,
+        msa_tools_n_cpu: int = 8,
+    ): ...
+
+    def process(
+        self,
+        input_fasta_path: str,
+        msa_output_dir: str,
+    ) -> FeatureDict:
+        """Runs alignment tools on the input sequence and creates features."""
+```
+
+`DataPipeline.process` returns a `FeatureDict` (a `MutableMapping[str, np.ndarray]`) that is written to `features.pkl` and consumed by the model.
